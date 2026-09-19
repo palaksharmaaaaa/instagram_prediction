@@ -13,7 +13,7 @@ class Settings(BaseModel):
     BASE_DIR: Path = Path(__file__).resolve().parent.parent.parent.parent
     DATA_DIR: Path = BASE_DIR / "data"
     RAW_DATA_PATH: Path = DATA_DIR / "raw" / "instagram_profiles_posts.csv"
-    LEGACY_DATA_PATH: Path = DATA_DIR / "top_200_instagrammers.csv"
+    CONSOLIDATED_DATA_PATH: Path = DATA_DIR / "consolidated_profiles_posts.csv"
     MODELS_DIR: Path = BASE_DIR / "models"
     
     # Model Artifact Paths

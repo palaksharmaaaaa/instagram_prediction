@@ -45,3 +45,27 @@ def explain_post_simulation(
 
     explanations = explain_post_prediction(post=post, profile=profile)
     return True, [], explanations
+
+
+def run_post_simulation_and_interpret(
+    profile_data: Dict[str, Any],
+    post_data: Dict[str, Any],
+    prompt: Optional[str] = None
+) -> Tuple[bool, List[str], Optional[Dict[str, Any]]]:
+    """
+    Simulates post performance and translates the result into a conversational,
+    creator-facing AI interpretation dialogue.
+    """
+    success, errors, prediction = run_post_simulation(profile_data, post_data)
+    if not success or prediction is None:
+        return False, errors, None
+
+    from .interpreter_service import interpret_simulation_result, format_simulation_for_interpretation
+    sim_dict = format_simulation_for_interpretation(
+        prediction,
+        profile_data=profile_data,
+        post_data=post_data
+    )
+    interpretation = interpret_simulation_result(sim_dict, prompt=prompt)
+    return True, [], interpretation
+
