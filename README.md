@@ -263,7 +263,7 @@ All incoming data—whether loaded from CSV, submitted via API, or provided thro
   - Pre-validator `sync_gender_pct`: Automatically populates the opposite gender percentage if only one is specified, preserving backward compatibility.
   - Synchronizes `account_category` with `account_categories`.
 - **`ConfidenceInterval`**:
-  - Enforces monotonic confidence bounds: $\text{lower\_bound} \le \text{point\_estimate} \le \text{upper\_bound}$.
+  - Enforces monotonic confidence bounds: `lower_bound` $\le$ `point_estimate` $\le$ `upper_bound`.
   - Contains `level: Optional[str]` reporting the exact calibrated coverage applied (e.g. `"80% Mondrian Conformal Coverage"`).
 - **`ParsedQuery`**:
   - Exposes ergonomic helper properties `username`, `min_followers`, and `max_followers` with decimal multiplier resolution.
@@ -290,25 +290,25 @@ Post content styles are decomposed into 5 multi-hot binary indicator features:
 ### 3. Domain Interaction Terms & Mathematical Formulas
 
 #### 1. Creator Scale Engagement (Replaces Collinear Reach Potential)
-$$\text{creator\_scale\_engagement} = \ln(1 + \text{followers}) \times \left(\frac{\text{total\_engagement}}{\text{followers} + 1}\right)$$
+$$\text{Creator Scale Engagement} = \ln(1 + \text{Followers}) \times \left(\frac{\text{Total Engagement}}{\text{Followers} + 1}\right)$$
 
 #### 2. Save Efficiency
-$$\text{save\_efficiency} = \left(\frac{\text{per\_media\_saves}}{\text{per\_media\_likes} + 1}\right) \times (1 + \text{is\_carousel} + 0.5 \times \text{is\_educational})$$
+$$\text{Save Efficiency} = \left(\frac{\text{Saves}}{\text{Likes} + 1}\right) \times (1 + \text{IsCarousel} + 0.5 \times \text{IsEducational})$$
 
 #### 3. Virality Momentum
-$$\text{virality\_momentum} = \frac{2.0 \times \text{per\_media\_shares} + 1.5 \times \text{per\_media\_saves}}{\text{per\_media\_likes} + \text{per\_media\_comments} + 1}$$
+$$\text{Virality Momentum} = \frac{2.0 \times \text{Shares} + 1.5 \times \text{Saves}}{\text{Likes} + \text{Comments} + 1}$$
 
 #### 4. Explore Discovery Potential
-$$\text{explore\_discovery\_potential} = \text{virality\_momentum} \times (1 + \text{reach\_from\_explore\_pct})$$
+$$\text{Explore Discovery Potential} = \text{Virality Momentum} \times (1 + \text{Explore Reach Pct})$$
 
 #### 5. Watch Efficiency
-$$\text{watch\_efficiency} = \text{per\_media\_completion\_rate} \times \text{is\_reel}$$
+$$\text{Watch Efficiency} = \text{Completion Rate} \times \text{IsReel}$$
 
 #### 6. Call-to-Action Boost
-$$\text{call\_to\_action\_boost} = \text{has\_call\_to\_action} \times (1 + 0.5 \times \text{is\_carousel})$$
+$$\text{Call-to-Action Boost} = \text{HasCTA} \times (1 + 0.5 \times \text{IsCarousel})$$
 
 #### 7. Hashtag Density
-$$\text{hashtag\_density} = \frac{\text{hashtags\_count}}{\ln(1 + \text{caption\_length\_chars}) + 1}$$
+$$\text{Hashtag Density} = \frac{\text{Hashtags Count}}{\ln(1 + \text{Caption Length Chars}) + 1}$$
 
 ---
 
@@ -365,7 +365,7 @@ Located in [`src/instagram_predictor/guardrails/`](file:///d:/Work/Projects/proj
 1. **`PlatformSanityGuardrail`**:
    - Following Limit: $\text{Following} \le 7,500$.
    - Bounds Check: Non-negative metrics across all counts.
-   - Demographics Check: $\text{female\_pct} + \text{male\_pct} \approx 1.0$.
+   - Demographics Check: `gender_female_pct` + `gender_male_pct` $\approx 1.0$.
 2. **`MathematicalInvariantGuardrail`**:
    - $\text{Reach} \le \text{Impressions}$.
    - $\text{Likes} \le \text{Impressions}$, $\text{Shares} \le \text{Impressions}$, $\text{Comments} \le \text{Impressions}$.
