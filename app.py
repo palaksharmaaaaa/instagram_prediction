@@ -46,6 +46,16 @@ def posts_df():
         return None, str(e)
 
 
+def progress_bar(initial: str = "starting"):
+    """Returns (callback, bar). The callback shows 'NN% - message' and never exceeds 100%."""
+    bar = st.progress(0.0, text=f"0% - {initial}")
+
+    def cb(frac: float, msg: str) -> None:
+        frac = min(max(float(frac), 0.0), 1.0)
+        bar.progress(frac, text=f"{int(round(frac * 100))}% - {msg}")
+    return cb, bar
+
+
 def show_report(report) -> None:
     st.write(f"**{report.summary()}**")
     for n in report.notes:
@@ -117,11 +127,13 @@ with tab_data:
 
     st.subheader("Train")
     if st.button("Train model on data/posts.csv", disabled=posts is None):
+        cb, bar = progress_bar("starting training")
         try:
-            with st.spinner("Cross-validating against the baseline and checking interval coverage..."):
-                md = train_and_persist()
+            with st.spinner("Training: cross-validating against the baseline and checking interval coverage..."):
+                md = train_and_persist(progress=cb)
             st.success(f"Trained. Selected: {md['reach']['selected']}. See the Model report tab.")
         except (InsufficientDataError, ValueError, NoDataError) as e:
+            bar.empty()
             st.error(str(e))
 
     with st.expander("Import from Meta Graph API (observed insights only)"):
@@ -129,26 +141,61 @@ with tab_data:
                    "impressions is not available in current API versions. Hours are UTC. "
                    "total_followers is the CURRENT count, not the count at post time.")
         token = st.text_input("Access token", type="password")
-        acct = st.text_input("Instagram account ID")
+        if st.button("Discover accounts"):
+            if not token:
+                st.error("Enter the access token first.")
+            else:
+                try:
+                    with st.spinner("Asking Meta which Instagram accounts this token can access..."):
+                        found = InstagramGraphAPIClient(access_token=token).get_connected_instagram_accounts()
+                    st.session_state["ig_accounts"] = found
+                    if not found:
+                        st.warning("No Instagram Professional account is linked to a Facebook Page this token can see. "
+                                   "The token needs pages_show_list (and instagram_basic) permissions.")
+                except MetaGraphAPIError as e:
+                    st.error(str(e))
+        accounts = st.session_state.get("ig_accounts", [])
+        acct = None
+        if accounts:
+            labels = [f"@{x['username']}  (Page: {x['page_name']})  ID {x['instagram_account_id']}" for x in accounts]
+            chosen = st.selectbox("Account", labels)
+            acct = accounts[labels.index(chosen)]["instagram_account_id"]
+        else:
+            acct = st.text_input("Instagram account ID (numeric, not the username)", placeholder="17841400000000000")
         limit = st.number_input("Posts to fetch", 1, 100, 25)
         if st.button("Fetch"):
             if not token or not acct:
                 st.error("Token and account ID are required.")
             else:
+                cb, bar = progress_bar("connecting to Meta")
                 try:
-                    prof, rows = InstagramGraphAPIClient(access_token=token).fetch_creator_snapshot(acct, media_limit=int(limit))
+                    with st.spinner("Fetching your profile and posts from Meta Graph API..."):
+                        prof, rows = InstagramGraphAPIClient(access_token=token).fetch_creator_snapshot(
+                            acct, media_limit=int(limit), progress=cb)
                     st.session_state["meta_rows"] = pd.DataFrame(rows)
                     st.success(f"Fetched @{prof.username} ({prof.total_followers:,} followers) and {len(rows)} posts.")
                 except MetaGraphAPIError as e:
+                    bar.empty()
                     st.error(str(e))
         if "meta_rows" in st.session_state:
             fetched = st.session_state["meta_rows"]
             st.dataframe(fetched, width="stretch")
             n_reach = int(fetched["per_media_reach"].notna().sum()) if "per_media_reach" in fetched else 0
             st.write(f"{n_reach} of {len(fetched)} fetched posts have observed reach (only those can be used for training).")
+            if "insights_unavailable_reason" in fetched and fetched["insights_unavailable_reason"].notna().any():
+                why = fetched["insights_unavailable_reason"].value_counts()
+                st.warning("Meta gave no insights for some posts, so they cannot be used for training:\n\n" +
+                           "\n".join(f"- **{n}** posts: {r}" for r, n in why.items()))
             st.download_button("Download as CSV", sanitize_dataframe_for_csv(fetched).to_csv(index=False), "meta_posts.csv", "text/csv")
-            if st.button("Append to data/posts.csv"):
-                st.success(f"Appended {append_posts_csv(fetched)} new rows (existing rows untouched).")
+            if st.button("Append posts with observed reach to data/posts.csv"):
+                usable = fetched[fetched["per_media_reach"].notna()] if "per_media_reach" in fetched else fetched.iloc[0:0]
+                if usable.empty:
+                    st.warning("Nothing appended: none of these posts has observed reach, so none can be used for training. "
+                               "posts.csv is left unchanged.")
+                else:
+                    n = append_posts_csv(usable)
+                    st.success(f"Appended {n} new rows with observed reach ({len(fetched) - len(usable)} without reach skipped; "
+                               "existing rows untouched).")
 
 # ------------------------------------------------------------------ CREATORS
 with tab_creators:

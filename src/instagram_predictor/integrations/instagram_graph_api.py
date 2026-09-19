@@ -6,7 +6,7 @@ import urllib.parse
 import urllib.error
 from datetime import datetime
 from datetime import timezone
-from typing import Optional, List, Dict, Any, Tuple
+from typing import Callable, Optional, List, Dict, Any, Tuple
 
 from instagram_predictor.schemas.profile import ProfileInput, PlatformType
 
@@ -95,8 +95,22 @@ class InstagramGraphAPIClient:
     insights can be appended to the training data.
     """
 
-    DEFAULT_API_VERSION = "v22.0"
+    DEFAULT_API_VERSION = "v26.0"
     DEFAULT_BASE_URL = f"https://graph.facebook.com/{DEFAULT_API_VERSION}"
+
+    @staticmethod
+    def _clean_account_id(value: Any) -> str:
+        """
+        Instagram account IDs are long numbers (e.g. 17841400000000000). Usernames and @handles are rejected here,
+        with an explanation, instead of being sent to Meta and failing with a misleading permissions error.
+        """
+        text = str(value or "").strip()
+        if not re.fullmatch(r"\d{5,}", text):
+            raise MetaGraphAPIError(
+                f"'{text}' is not a numeric Instagram account ID. Enter the number (like 17841400000000000), "
+                "not the username. Use 'Discover accounts' to list the IDs your token can access."
+            )
+        return text
 
     def __init__(
         self,
@@ -229,6 +243,14 @@ class InstagramGraphAPIClient:
                 "Generate a fresh token via Meta Graph API Explorer or your Facebook Developer App."
             )
 
+        # "Object with ID ... does not exist, cannot be loaded due to missing permissions, or does not support this operation"
+        if error_code == 100 and (error_subcode == 33 or "does not exist" in msg_lower):
+            return (
+                "Meta could not load that object. Most often the ID is not the numeric Instagram Business account ID "
+                "(usernames do not work), or this token's user has no access to that account. Use 'Discover accounts' to get "
+                "the correct ID, and confirm the Instagram account is a Professional account linked to a Facebook Page."
+            )
+
         # Rate limits
         if (
             error_code in (4, 17, 32, 613)
@@ -342,9 +364,7 @@ class InstagramGraphAPIClient:
         access_token: Optional[str] = None,
     ) -> ProfileInput:
         """GET /{id}?fields=... -> ProfileInput containing only what Meta returned."""
-        if not instagram_account_id or not str(instagram_account_id).strip():
-            raise MetaGraphAPIError("An Instagram Account ID is required to fetch profile data.")
-        account_id = str(instagram_account_id).strip()
+        account_id = self._clean_account_id(instagram_account_id)
         fields = "id,username,name,biography,followers_count,follows_count,media_count,profile_picture_url,website"
         data = self._request(account_id, params={"fields": fields}, access_token=access_token)
         if "followers_count" not in data:
@@ -368,15 +388,26 @@ class InstagramGraphAPIClient:
             profile_picture_url=data.get("profile_picture_url"),
         )
 
-    def _fetch_media_insights(self, media_id: str, token: Optional[str]) -> Dict[str, int]:
+    # Meta error subcodes that mean "this post can never have insights" (retrying other metrics cannot help)
+    _NO_INSIGHTS_SUBCODES = {
+        2108006: "Posted before the account was converted to a Professional account; Meta provides no insights for it",
+    }
+
+    def _fetch_media_insights(self, media_id: str, token: Optional[str]) -> Tuple[Dict[str, int], Optional[str]]:
         """
-        Insights for one media item. Meta rejects the whole call if any metric is unsupported for that media type,
-        so we retry with narrower metric sets. Returns only metrics Meta actually returned (possibly empty).
+        Insights for one media item -> (metrics, reason_if_none).
+        Meta rejects the whole call if any metric is unsupported for that media type, so narrower metric sets are
+        retried, except when Meta says the post can never have insights. Only metrics Meta actually returned are
+        included; when there are none, the reason Meta gave is returned so it can be shown, never hidden.
         """
+        reason: Optional[str] = None
         for metrics in ("reach,saved,shares,views,total_interactions", "reach,saved,shares", "reach"):
             try:
                 resp = self._request(f"{media_id}/insights", params={"metric": metrics}, access_token=token)
-            except MetaGraphAPIError:
+            except MetaGraphAPIError as e:
+                reason = self._NO_INSIGHTS_SUBCODES.get(e.error_subcode) or sanitize_tokens_in_text(e.raw_message)[:160]
+                if e.error_subcode in self._NO_INSIGHTS_SUBCODES:
+                    break
                 continue
             out: Dict[str, int] = {}
             for entry in resp.get("data", []):
@@ -388,8 +419,8 @@ class InstagramGraphAPIClient:
                     val = entry["total_value"].get("value")
                 if name and isinstance(val, (int, float)):
                     out[name] = int(val)
-            return out
-        return {}
+            return out, (None if out else "Meta returned no insight values for this post")
+        return {}, reason
 
     @staticmethod
     def _map_media_type(media_type: Optional[str], product_type: Optional[str]) -> Optional[str]:
@@ -409,6 +440,8 @@ class InstagramGraphAPIClient:
         instagram_account_id: str,
         limit: int = 25,
         access_token: Optional[str] = None,
+        progress: Optional[Callable[[float, str], None]] = None,
+        span: Tuple[float, float] = (0.0, 1.0),
     ) -> List[Dict[str, Any]]:
         """
         Recent media as rows in the data/posts.csv layout. Only observed values are included:
@@ -417,9 +450,7 @@ class InstagramGraphAPIClient:
           * posted_day_of_week / posted_hour_of_day are derived from Meta's timestamp and are in UTC
           * has_call_to_action and video_duration_seconds are not reported by the API and are left absent
         """
-        if not instagram_account_id or not str(instagram_account_id).strip():
-            raise MetaGraphAPIError("An Instagram Account ID is required to fetch media.")
-        account_id = str(instagram_account_id).strip()
+        account_id = self._clean_account_id(instagram_account_id)
         token = access_token or self.access_token
         response = self._request(
             f"{account_id}/media",
@@ -428,7 +459,11 @@ class InstagramGraphAPIClient:
             access_token=token,
         )
         rows: List[Dict[str, Any]] = []
-        for item in response.get("data", []):
+        items = response.get("data", [])
+        lo, hi = span
+        for i, item in enumerate(items):
+            if progress:
+                progress(lo + (hi - lo) * (i / max(len(items), 1)), f"reading insights for post {i + 1} of {len(items)}")
             mt = self._map_media_type(item.get("media_type"), item.get("media_product_type"))
             ts = item.get("timestamp")
             if mt is None or not ts:
@@ -456,7 +491,9 @@ class InstagramGraphAPIClient:
             for src, dst in (("like_count", "per_media_likes"), ("comments_count", "per_media_comments")):
                 if item.get(src) is not None:
                     row[dst] = int(item[src])
-            ins = self._fetch_media_insights(item.get("id"), token)
+            ins, why_none = self._fetch_media_insights(item.get("id"), token)
+            if not ins and why_none:
+                row["insights_unavailable_reason"] = why_none
             for src, dst in (("reach", "per_media_reach"), ("saved", "per_media_saves"), ("shares", "per_media_shares"),
                              ("views", "per_media_views"), ("total_interactions", "per_media_total_interactions")):
                 if src in ins:
@@ -469,14 +506,23 @@ class InstagramGraphAPIClient:
         instagram_account_id: str,
         media_limit: int = 25,
         access_token: Optional[str] = None,
+        progress: Optional[Callable[[float, str], None]] = None,
     ) -> Tuple[ProfileInput, List[Dict[str, Any]]]:
         """
         Profile plus post rows. Each row carries the CURRENT follower count (`total_followers`) and the fetch time,
         because Meta does not report the follower count at post time. Rows without observed reach are kept
         but cannot be used for training (the loader rejects them).
         """
+        def report(frac: float, msg: str) -> None:
+            if progress:
+                progress(frac, msg)
+
+        report(0.02, "reading the profile")
         profile = self.fetch_profile_data(instagram_account_id, access_token=access_token)
-        rows = self.fetch_media_records(instagram_account_id, limit=media_limit, access_token=access_token)
+        report(0.10, "listing recent posts")
+        rows = self.fetch_media_records(instagram_account_id, limit=media_limit, access_token=access_token,
+                                        progress=progress, span=(0.15, 0.98))
+        report(1.0, "done")
         now = datetime.now(timezone.utc).isoformat()
         for r in rows:
             r["username"] = profile.username

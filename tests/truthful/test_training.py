@@ -128,3 +128,19 @@ def test_append_posts_skips_existing_ids_and_never_edits_old_rows(tmp_path):
     assert append_posts_csv(second, path) == 1
     out = pd.read_csv(path)
     assert list(out["post_id"]) == ["a", "b", "c"] and list(out["per_media_reach"]) == [10, 20, 30]
+
+
+def test_training_reports_monotonic_progress_ending_at_100_percent(tmp_path, monkeypatch):
+    from conftest import make_posts_csv
+    from instagram_predictor.config import settings
+    from instagram_predictor.models import train_and_persist
+    csv_path = tmp_path / "posts.csv"
+    csv_path.write_text(make_posts_csv(seed=6, reel_effect=0.6))
+    monkeypatch.setattr(settings, "MODEL_PATH", tmp_path / "m.joblib")
+    monkeypatch.setattr(settings, "MODEL_METADATA_PATH", tmp_path / "m.json")
+    seen = []
+    train_and_persist(posts_source=csv_path, coverage_repeats=3, progress=lambda f, m: seen.append((f, m)))
+    fracs = [f for f, _ in seen]
+    assert fracs == sorted(fracs), "progress went backwards"
+    assert fracs[0] <= 0.05 and fracs[-1] == 1.0 and all(0.0 <= f <= 1.0 for f in fracs)
+    assert len(seen) > 10, "progress should update throughout, not just at the ends"

@@ -44,6 +44,18 @@ MIN_TIER_CREATORS = 10
 MIN_IMPRESSION_COVERAGE = 0.80
 
 
+class _Stage:
+    """Reports fractional progress of one training stage to an optional callback(fraction, message)."""
+
+    def __init__(self, cb, lo: float, hi: float, total: int, msg: str):
+        self.cb, self.lo, self.hi, self.total, self.msg, self.n = cb, lo, hi, max(total, 1), msg, 0
+
+    def tick(self) -> None:
+        self.n += 1
+        if self.cb:
+            self.cb(self.lo + (self.hi - self.lo) * min(self.n / self.total, 1.0), self.msg)
+
+
 class InsufficientDataError(ValueError):
     """Raised when the supplied data cannot support a trustworthy model."""
 
@@ -166,6 +178,7 @@ def _grouped_cv(
     seed: int,
     reps: int,
     k: int,
+    tick: Optional[Callable[[], None]] = None,
 ) -> Tuple[Dict[str, Dict[str, Any]], Dict[str, np.ndarray]]:
     """Repeated creator-grouped CV. Returns per-candidate summaries and the OOF predictions of rep 0."""
     fold_mae: Dict[str, List[float]] = {n: [] for n in factories}
@@ -181,6 +194,8 @@ def _grouped_cv(
                 pred = model.predict(X[va])
                 oof[name][va] = pred
                 fold_mae[name].append(float(np.mean(np.abs(pred - y[va]))))
+            if tick:
+                tick()
         for name in factories:
             rep_metrics[name].append(_metrics(y, oof[name]))
         if rep == 0:
@@ -231,7 +246,7 @@ def _calibration(scores: np.ndarray, followers: np.ndarray, creators: np.ndarray
 
 def _empirical_coverage(
     make: Callable[[], Any], X: pd.DataFrame, y: np.ndarray, groups: pd.Series, followers: np.ndarray,
-    seed: int, reps: int,
+    seed: int, reps: int, tick: Optional[Callable[[], None]] = None,
 ) -> Dict[str, Any]:
     """
     Measures the real coverage of the interval procedure on creators never used for fitting OR calibration:
@@ -241,6 +256,8 @@ def _empirical_coverage(
     rng = np.random.default_rng(seed + 1000)
     c80, c90, per_tier = [], [], {t: [] for t in TIERS}
     for _ in range(reps):
+        if tick:
+            tick()
         perm = rng.permutation(len(creators))
         n_tr, n_ca = int(0.6 * len(creators)), int(0.2 * len(creators))
         tr_c, ca_c, te_c = (set(creators[perm[:n_tr]]), set(creators[perm[n_tr:n_tr + n_ca]]), set(creators[perm[n_tr + n_ca:]]))
@@ -291,9 +308,9 @@ def _support(posts: pd.DataFrame, spec: Dict) -> Dict[str, Any]:
 
 def _fit_track(
     factories: Dict[str, Callable[[], Any]], baseline: str,
-    X: pd.DataFrame, y: np.ndarray, groups: pd.Series, seed: int, reps: int, k: int,
+    X: pd.DataFrame, y: np.ndarray, groups: pd.Series, seed: int, reps: int, k: int, tick: Optional[Callable[[], None]] = None,
 ) -> Tuple[str, Dict[str, Any], Dict[str, np.ndarray]]:
-    summary, oof0 = _grouped_cv(factories, X, y, groups, seed, reps, k)
+    summary, oof0 = _grouped_cv(factories, X, y, groups, seed, reps, k, tick=tick)
     chosen = _select(summary, baseline)
     base_mae, chosen_mae = summary[baseline]["log_mae"], summary[chosen]["log_mae"]
     return chosen, {
@@ -315,6 +332,7 @@ def train_forecaster(
     coverage_repeats: int = 20,
     min_posts: Optional[int] = None,
     min_creators: Optional[int] = None,
+    progress: Optional[Callable[[float, str], None]] = None,
 ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
     min_posts = settings.MIN_TRAIN_POSTS if min_posts is None else min_posts
     min_creators = settings.MIN_TRAIN_CREATORS if min_creators is None else min_creators
@@ -335,12 +353,19 @@ def train_forecaster(
     logger.info("Training on %d posts / %d creators; features=%s", n_posts, n_creators, spec["numeric"] + spec["categorical"])
 
     # ---- reach
-    chosen, reach_eval, oof0 = _fit_track(_reach_candidates(spec, n_posts, seed), BASELINE, X, y, groups, seed, cv_repeats, k)
+    if progress:
+        progress(0.03, "checking the data")
+    cv_stage = _Stage(progress, 0.05, 0.55, cv_repeats * k, "cross-validating reach models on held-out creators")
+    chosen, reach_eval, oof0 = _fit_track(_reach_candidates(spec, n_posts, seed), BASELINE, X, y, groups, seed, cv_repeats, k,
+                                          tick=cv_stage.tick)
     reach_scores = np.abs(oof0[chosen] - y)
     reach_cal = _calibration(reach_scores, followers, groups.to_numpy())
     reach_eval["calibration"] = reach_cal
+    cov_stage = _Stage(progress, 0.55, 0.78, coverage_repeats, "measuring interval coverage on unseen creators")
     reach_eval["interval_validation"] = _empirical_coverage(
-        _reach_candidates(spec, n_posts, seed)[chosen], X, y, groups, followers, seed, coverage_repeats)
+        _reach_candidates(spec, n_posts, seed)[chosen], X, y, groups, followers, seed, coverage_repeats, tick=cov_stage.tick)
+    if progress:
+        progress(0.78, "fitting the final reach model")
     reach_model = _reach_candidates(spec, n_posts, seed)[chosen]().fit(X, y)
 
     # ---- impressions (only if genuinely observed for enough rows)
@@ -355,8 +380,9 @@ def train_forecaster(
         y_ratio = np.log1p(sub[IMPRESSIONS_COLUMN].to_numpy(dtype=float)) - y_reach_i
         gi = sub["username"]
         ki = int(max(2, min(5, n_imp_creators // 6)))
+        imp_stage = _Stage(progress, 0.78, 0.93, cv_repeats * ki, "cross-validating the impressions model")
         ratio_choice, imp_eval, oof_r0 = _fit_track(_ratio_candidates(spec, n_imp, seed), "constant_median_ratio",
-                                                   Xi, y_ratio, gi, seed, cv_repeats, ki)
+                                                   Xi, y_ratio, gi, seed, cv_repeats, ki, tick=imp_stage.tick)
         # impressions = predicted reach x predicted frequency; OOF composition for honest calibration
         reach_oof_sub = _grouped_cv({chosen: _reach_candidates(spec, n_imp, seed)[chosen]}, Xi, y_reach_i, gi, seed, 1, ki)[1][chosen]
         composed = reach_oof_sub + np.maximum(oof_r0[ratio_choice], 0.0)
@@ -372,6 +398,8 @@ def train_forecaster(
             f"(need >= {MIN_IMPRESSION_COVERAGE:.0%} of rows, {min_posts} rows and {min_creators} creators)"
         )
 
+    if progress:
+        progress(0.95, "writing the model report")
     fingerprint = hashlib.sha256(pd.util.hash_pandas_object(posts, index=False).to_numpy().tobytes()).hexdigest()
     metadata: Dict[str, Any] = {
         "schema_version": 3,
@@ -425,12 +453,19 @@ def train_and_persist(posts_source=None, profiles_source=None, **kwargs) -> Dict
         profiles, _ = load_profiles(profiles_source)
     except NoDataError:
         profiles = None
+    progress = kwargs.get("progress")
+    if progress:
+        progress(0.01, "reading and validating posts.csv")
     posts, report = load_posts(posts_source, profiles=profiles)
     bundle, metadata = train_forecaster(posts, **kwargs)
     metadata["data"]["validation"] = {"rows_read": report.rows_read, "rows_used": report.rows_used,
                                        "rows_rejected": report.rows_rejected, "notes": report.notes}
+    if progress:
+        progress(0.98, "saving the model")
     save_model(bundle, metadata)
     clear_registry_cache()
+    if progress:
+        progress(1.0, "done")
     return metadata
 
 
