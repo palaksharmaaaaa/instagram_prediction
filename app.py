@@ -1,1355 +1,314 @@
+import io
 import os
 import sys
 from pathlib import Path
+
 import pandas as pd
 import streamlit as st
-import plotly.express as px
-import plotly.graph_objects as go
 
-# Ensure src is in python path
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "src"))
 
 from instagram_predictor.config import settings
-from instagram_predictor.data import load_dataset
-from instagram_predictor.services import (
-    run_analytics_pipeline,
-    run_post_simulation,
-    interpret_simulation_result,
-    format_simulation_for_interpretation,
-)
-from instagram_predictor.models import (
-    get_model_metadata,
-    get_reach_pipeline,
-    get_impressions_pipeline,
-    explain_post_prediction,
+from instagram_predictor.data import (
+    NoDataError, POST_TEMPLATE_COLUMNS, append_posts_csv, load_posts, load_profiles,
 )
 from instagram_predictor.guardrails import sanitize_dataframe_for_csv
-from instagram_predictor.utils import format_number, format_percentage
-from instagram_predictor.schemas import (
-    PlatformType, MediaType, ContentCategory, ContentStyle, Demographics, PostMetrics, ProfileInput, PostInput
-)
 from instagram_predictor.integrations import InstagramGraphAPIClient, MetaGraphAPIError
+from instagram_predictor.models import (
+    InsufficientDataError, ModelVersionError, NoModelError, OutOfSupportError, SecurityError,
+    forecast_formats, forecast_post, load_metadata, load_model, model_available, train_and_persist,
+)
+from instagram_predictor.schemas import PlatformType, PostInput, ProfileInput, platform_of, DAYS_OF_WEEK
+from instagram_predictor.services import observed_post_summary, run_creator_query
+from instagram_predictor.utils import format_number
 
+st.set_page_config(page_title="Reach Forecaster", page_icon="📈", layout="wide")
 
 
 @st.cache_data
-def get_cached_dataset() -> pd.DataFrame:
-    """Caches the full feature-engineered dataset across user interactions."""
-    return load_dataset()
+def cached_profiles(mtime: float) -> pd.DataFrame:
+    return load_profiles()[0]
 
 
-@st.cache_resource
-def get_cached_pipelines():
-    """Caches the trained ML pipelines across Streamlit reruns and sessions."""
-    return get_reach_pipeline(), get_impressions_pipeline()
+def profiles_df() -> pd.DataFrame | None:
+    p = Path(settings.PROFILES_PATH)
+    return cached_profiles(p.stat().st_mtime) if p.exists() else None
 
 
-@st.cache_data
-def get_cached_metadata():
-    """Caches model metadata and performance metrics."""
-    return get_model_metadata()
+def posts_df():
+    p = Path(settings.POSTS_PATH)
+    if not p.exists():
+        return None, None
+    prof = profiles_df()
+    try:
+        return load_posts(p, profiles=prof)
+    except ValueError as e:
+        return None, str(e)
 
-st.set_page_config(
-    page_title="Instagram AI Prediction & Analytics Engine",
-    page_icon="⚡",
-    layout="wide",
-    initial_sidebar_state="expanded"
+
+def show_report(report) -> None:
+    st.write(f"**{report.summary()}**")
+    for n in report.notes:
+        st.info(n)
+    if report.rows_rejected:
+        with st.expander(f"Why {report.rows_rejected} rows were rejected (rows are never repaired)"):
+            st.dataframe(report.rejected_frame(), hide_index=True, width="stretch")
+
+
+st.title("📈 Reach Forecaster")
+st.caption(
+    "Only real, observed data is shown or used. Forecasts come from a model trained on real post-level data you supply, "
+    "are checked against a simple baseline on held-out creators, and are refused outside the range of that data."
 )
 
-# Prominent Mode Selector in Sidebar
-st.sidebar.markdown("### 🎛️ Experience Mode")
-app_mode = st.sidebar.radio(
-    "Select Mode:",
-    ["✨ Creator Mode (Simple)", "🔬 Pro / Data Scientist Mode"],
-    index=0,
-    help="✨ Creator Mode (Simple): Clean, non-intimidating interface with quick post idea prompts and conversational AI strategy.\n🔬 Pro Mode: Deep engineering diagnostics, 54-slider simulator, and Exact Combinatorial Shapley Attribution waterfall."
-)
-st.sidebar.caption("ℹ️ **Benchmark Transparency**: Models are calibrated on synthetic benchmark data (750 samples across 250 creators) for simulated creative lever exploration.")
+posts, posts_report = posts_df()
+profiles = profiles_df()
 
-# =============================================================================
-# ✨ CREATOR MODE (SIMPLE) - Tailored for naive creators & marketers
-# =============================================================================
-if app_mode == "✨ Creator Mode (Simple)":
-    st.title("✨ AI Content Strategist & Post Studio")
-    st.caption("Craft, simulate, and optimize viral post concepts with real-time algorithmic coaching and plain-English briefings.")
-    st.info("💡 **Benchmark Simulation Note**: Projections are powered by machine learning models calibrated on creator benchmark data. They evaluate the relative lift of creative levers (formats, timing, call-to-action hooks) before publishing.")
+with st.sidebar:
+    st.subheader("Status")
+    st.write(f"Creator profiles: **{0 if profiles is None else len(profiles)}**")
+    if isinstance(posts_report, str):
+        st.error(f"posts.csv unusable: {posts_report}")
+    elif posts is None:
+        st.warning("No post-level data yet (data/posts.csv).")
+    else:
+        st.write(f"Usable posts: **{len(posts)}** from **{posts['username'].nunique()}** creators")
+    if model_available():
+        try:
+            m = load_metadata()
+            st.write(f"Model: **{m['reach']['selected']}** trained on {m['data']['n_posts']} posts")
+        except Exception as e:
+            st.error(str(e))
+    else:
+        st.warning("No trained model.")
 
-    # Initialize Creator State Defaults
-    if "creator_prompt" not in st.session_state:
-        st.session_state["creator_prompt"] = "🔥 Fitness Reel on Friday evening"
-    if "c_platform" not in st.session_state:
-        st.session_state["c_platform"] = PlatformType.INSTAGRAM.value
-    if "c_format" not in st.session_state:
-        st.session_state["c_format"] = MediaType.REEL.value
-    if "c_category" not in st.session_state:
-        st.session_state["c_category"] = ContentCategory.HEALTH_FITNESS.value
-    if "c_day" not in st.session_state:
-        st.session_state["c_day"] = "Friday"
-    if "c_hour" not in st.session_state:
-        st.session_state["c_hour"] = 19
-    if "c_duration" not in st.session_state:
-        st.session_state["c_duration"] = 30.0
-    if "c_slides" not in st.session_state:
-        st.session_state["c_slides"] = 1
-    if "c_caption_len" not in st.session_state:
-        st.session_state["c_caption_len"] = 250
-    if "c_hashtags" not in st.session_state:
-        st.session_state["c_hashtags"] = 6
-    if "c_cta" not in st.session_state:
-        st.session_state["c_cta"] = True
-    if "c_styles" not in st.session_state:
-        st.session_state["c_styles"] = [ContentStyle.EDUCATIONAL.value, ContentStyle.ENTERTAINING.value]
+tab_data, tab_creators, tab_forecast, tab_report = st.tabs(["Data", "Creators", "Forecast", "Model report"])
 
-    # Quick Suggestion Chips
-    st.markdown("##### 💡 Quick Suggestions")
-    sug_c1, sug_c2, sug_c3, sug_c4 = st.columns(4)
+# ------------------------------------------------------------------ DATA
+with tab_data:
+    st.subheader("Creator profiles (observed, as supplied)")
+    if profiles is None:
+        st.warning(f"{settings.PROFILES_PATH.name} not found.")
+    else:
+        st.write(f"{len(profiles)} creators. Blank cells mean the source had no value; nothing is filled in.")
+        with st.expander("Provenance and what was removed"):
+            prov = Path(settings.DATA_DIR) / "PROVENANCE.md"
+            st.markdown(prov.read_text(encoding="utf-8") if prov.exists() else "PROVENANCE.md missing")
 
-    with sug_c1:
-        if st.button("🔥 Fitness Reel on Friday evening", width="stretch"):
-            st.session_state["creator_prompt"] = "🔥 Fitness Reel on Friday evening"
-            st.session_state["c_platform"] = PlatformType.INSTAGRAM.value
-            st.session_state["c_format"] = MediaType.REEL.value
-            st.session_state["c_category"] = ContentCategory.HEALTH_FITNESS.value
-            st.session_state["c_day"] = "Friday"
-            st.session_state["c_hour"] = 19
-            st.session_state["c_duration"] = 30.0
-            st.session_state["c_slides"] = 1
-            st.session_state["c_caption_len"] = 250
-            st.session_state["c_hashtags"] = 6
-            st.session_state["c_cta"] = True
-            st.session_state["c_styles"] = [ContentStyle.EDUCATIONAL.value, ContentStyle.ENTERTAINING.value]
-            st.session_state["creator_plat_sel"] = PlatformType.INSTAGRAM.value
-            st.session_state["creator_fmt_sel"] = MediaType.REEL.value
-    with sug_c2:
-        if st.button("📸 5-Slide Travel Carousel", width="stretch"):
-            st.session_state["creator_prompt"] = "📸 5-Slide Travel Carousel"
-            st.session_state["c_platform"] = PlatformType.INSTAGRAM.value
-            st.session_state["c_format"] = MediaType.CAROUSEL.value
-            st.session_state["c_category"] = ContentCategory.TRAVEL_EVENTS.value
-            st.session_state["c_day"] = "Sunday"
-            st.session_state["c_hour"] = 18
-            st.session_state["c_duration"] = 0.0
-            st.session_state["c_slides"] = 5
-            st.session_state["c_caption_len"] = 300
-            st.session_state["c_hashtags"] = 8
-            st.session_state["c_cta"] = True
-            st.session_state["c_styles"] = [ContentStyle.INSPIRATIONAL.value, ContentStyle.ENTERTAINING.value]
-            st.session_state["creator_plat_sel"] = PlatformType.INSTAGRAM.value
-            st.session_state["creator_fmt_sel"] = MediaType.CAROUSEL.value
-    with sug_c3:
-        if st.button("⚡ Tech Breakdown YouTube Short", width="stretch"):
-            st.session_state["creator_prompt"] = "⚡ Tech Breakdown YouTube Short"
-            st.session_state["c_platform"] = PlatformType.YOUTUBE.value
-            st.session_state["c_format"] = MediaType.YOUTUBE_SHORT.value
-            st.session_state["c_category"] = ContentCategory.SCIENCE_TECHNOLOGY.value
-            st.session_state["c_day"] = "Wednesday"
-            st.session_state["c_hour"] = 17
-            st.session_state["c_duration"] = 45.0
-            st.session_state["c_slides"] = 1
-            st.session_state["c_caption_len"] = 150
-            st.session_state["c_hashtags"] = 5
-            st.session_state["c_cta"] = True
-            st.session_state["c_styles"] = [ContentStyle.EDUCATIONAL.value]
-            st.session_state["creator_plat_sel"] = PlatformType.YOUTUBE.value
-            st.session_state["creator_fmt_sel"] = MediaType.YOUTUBE_SHORT.value
-    with sug_c4:
-        if st.button("🌟 Comedy Snapchat Spotlight", width="stretch"):
-            st.session_state["creator_prompt"] = "🌟 Comedy Snapchat Spotlight"
-            st.session_state["c_platform"] = PlatformType.SNAPCHAT.value
-            st.session_state["c_format"] = MediaType.SNAPCHAT_SPOTLIGHT.value
-            st.session_state["c_category"] = ContentCategory.MUSIC_ENTERTAINMENT.value
-            st.session_state["c_day"] = "Saturday"
-            st.session_state["c_hour"] = 20
-            st.session_state["c_duration"] = 15.0
-            st.session_state["c_slides"] = 1
-            st.session_state["c_caption_len"] = 80
-            st.session_state["c_hashtags"] = 4
-            st.session_state["c_cta"] = False
-            st.session_state["c_styles"] = [ContentStyle.ENTERTAINING.value]
-            st.session_state["creator_plat_sel"] = PlatformType.SNAPCHAT.value
-            st.session_state["creator_fmt_sel"] = MediaType.SNAPCHAT_SPOTLIGHT.value
+    st.subheader("Post-level training data (yours)")
+    st.write("Required columns: `username, media_type, posted_day_of_week, posted_hour_of_day, total_followers, per_media_reach`. "
+             "Use the **same hour convention** here as when you forecast (the Meta connector records UTC).")
+    st.download_button("Download template CSV", ",".join(POST_TEMPLATE_COLUMNS) + "\n", "posts_template.csv", "text/csv")
 
-    # Prominent Prompt Input Box
-    default_prompt_text = st.session_state.get("creator_prompt", "🔥 Fitness Reel on Friday evening")
-    user_prompt = st.text_input(
-        "✨ Describe your post idea, topic, or query...",
-        value=default_prompt_text,
-        placeholder="e.g. 5-Slide Travel Carousel on Sunday evening, or Why is my reach lower than expected?",
-        help="Describe your content idea or ask an algorithmic strategy question."
-    )
-    st.session_state["creator_prompt"] = user_prompt
+    if posts is not None:
+        show_report(posts_report)
 
-    # Detect keyword hints if user modified the prompt
-    p_lower = user_prompt.lower()
-    inferred_platform = st.session_state["c_platform"]
-    inferred_format = st.session_state["c_format"]
-    if "youtube" in p_lower or "yt" in p_lower:
-        inferred_platform = PlatformType.YOUTUBE.value
-        inferred_format = MediaType.YOUTUBE_SHORT.value if any(w in p_lower for w in ["short", "reel"]) else MediaType.YOUTUBE_VIDEO.value
-    elif "snapchat" in p_lower or "spotlight" in p_lower:
-        inferred_platform = PlatformType.SNAPCHAT.value
-        inferred_format = MediaType.SNAPCHAT_SPOTLIGHT.value
-    elif "carousel" in p_lower:
-        inferred_platform = PlatformType.INSTAGRAM.value
-        inferred_format = MediaType.CAROUSEL.value
-    elif "reel" in p_lower:
-        inferred_platform = PlatformType.INSTAGRAM.value
-        inferred_format = MediaType.REEL.value
+    up = st.file_uploader("Upload real post-level CSV", type="csv")
+    if up is not None:
+        try:
+            up_posts, up_report = load_posts(io.BytesIO(up.getvalue()), profiles=profiles)
+            show_report(up_report)
+            if up_report.rows_used and st.button(f"Save as {settings.POSTS_PATH.name} (replaces the current file)"):
+                settings.POSTS_PATH.parent.mkdir(parents=True, exist_ok=True)
+                settings.POSTS_PATH.write_bytes(up.getvalue())
+                st.success("Saved. Reload the page, then train.")
+        except (ValueError, NoDataError) as e:
+            st.error(str(e))
 
-    # Collapsible Quick Post Customizer
-    with st.expander("🛠️ Quick Post Customizer (Optional)", expanded=False):
-        st.caption("Fine-tune your creator profile, schedule, and format details without technical clutter:")
-        qc_col1, qc_col2, qc_col3 = st.columns(3)
+    st.subheader("Train")
+    if st.button("Train model on data/posts.csv", disabled=posts is None):
+        try:
+            with st.spinner("Cross-validating against the baseline and checking interval coverage..."):
+                md = train_and_persist()
+            st.success(f"Trained. Selected: {md['reach']['selected']}. See the Model report tab.")
+        except (InsufficientDataError, ValueError, NoDataError) as e:
+            st.error(str(e))
 
-        raw_df = get_cached_dataset()
-        unique_creators = sorted(raw_df["username"].unique().tolist())
-
-        with qc_col1:
-            st.markdown("**1. Creator Account**")
-            profile_opts = ["Database Creator Profile", "Custom Follower Scale"]
-            if "live_creator_profile" in st.session_state:
-                profile_opts.insert(0, "🔗 Live Connected Creator Profile")
-
-            c_prof_mode = st.radio("Profile Baseline:", profile_opts, index=0, horizontal=True, key="creator_prof_mode")
-            if c_prof_mode == "🔗 Live Connected Creator Profile":
-                lp = st.session_state["live_creator_profile"]
-                ld = st.session_state.get("live_creator_demographics", Demographics())
-                c_uname = lp.username
-                c_fname = lp.full_name
-                c_followers = int(lp.total_followers)
-                c_following = int(lp.total_following)
-                c_posts = int(lp.total_media_posts)
-                c_cat = lp.account_category.value
-                c_country = ld.top_country
-                st.caption(f"**@{c_uname}** | {c_followers:,} followers")
-            elif c_prof_mode == "Database Creator Profile":
-                c_uname = st.selectbox("Select Account:", unique_creators, index=0, key="creator_account_sel")
-                u_row = raw_df[raw_df["username"] == c_uname].iloc[0]
-                c_fname = c_uname
-                c_followers = int(u_row["total_followers"])
-                c_following = int(u_row["total_following"])
-                c_posts = int(u_row["total_media_posts"])
-                c_cat = u_row["account_category"]
-                c_country = u_row["country"]
-                st.caption(f"**{c_followers:,} followers** | Category: {c_cat}")
-            else:
-                c_uname = "creator"
-                c_fname = "Creator"
-                c_followers = int(st.number_input("Followers:", min_value=100, max_value=1_000_000_000, value=250_000, step=10_000, key="creator_custom_followers"))
-                c_following = 450
-                c_posts = 250
-                c_cat = ContentCategory.HEALTH_FITNESS.value
-                c_country = "US"
-
-        with qc_col2:
-            st.markdown("**2. Destination & Format**")
-            plat_opts = [PlatformType.INSTAGRAM.value, PlatformType.YOUTUBE.value, PlatformType.SNAPCHAT.value]
-            cur_plat = inferred_platform if inferred_platform in plat_opts else PlatformType.INSTAGRAM.value
-            plat_idx = plat_opts.index(cur_plat)
-            selected_plat = st.selectbox("Platform:", plat_opts, index=plat_idx, key="creator_plat_sel")
-
-            platform_formats = {
-                PlatformType.INSTAGRAM.value: [
-                    MediaType.REEL.value,
-                    MediaType.CAROUSEL.value,
-                    MediaType.STATIC_IMAGE.value,
-                    MediaType.STORY.value,
-                    MediaType.VIDEO.value,
-                ],
-                PlatformType.YOUTUBE.value: [
-                    MediaType.YOUTUBE_SHORT.value,
-                    MediaType.YOUTUBE_VIDEO.value,
-                    MediaType.COMMUNITY_POST.value,
-                ],
-                PlatformType.SNAPCHAT.value: [
-                    MediaType.SNAPCHAT_SPOTLIGHT.value,
-                    MediaType.SNAPCHAT_STORY.value,
-                    MediaType.SNAPCHAT_POST.value,
-                ],
-            }
-            avail_formats = platform_formats.get(selected_plat, [MediaType.REEL.value])
-            if "creator_fmt_sel" in st.session_state and st.session_state["creator_fmt_sel"] not in avail_formats:
-                st.session_state["creator_fmt_sel"] = avail_formats[0]
-            cur_fmt = st.session_state.get("creator_fmt_sel", inferred_format if inferred_format in avail_formats else avail_formats[0])
-            fmt_idx = avail_formats.index(cur_fmt) if cur_fmt in avail_formats else 0
-            selected_format = st.selectbox("Media Format:", avail_formats, index=fmt_idx, key="creator_fmt_sel")
-
-            cat_opts = [c.value for c in ContentCategory]
-            def_cat = st.session_state.get("c_category", cat_opts[0])
-            cat_idx = cat_opts.index(def_cat) if def_cat in cat_opts else 0
-            selected_cat = st.selectbox("Content Niche:", cat_opts, index=cat_idx, key="creator_cat_sel")
-
-        with qc_col3:
-            st.markdown("**3. Timing & Content Specs**")
-            days = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
-            def_day = st.session_state.get("c_day", "Friday")
-            day_idx = days.index(def_day) if def_day in days else 4
-            selected_day = st.selectbox("Posting Day:", days, index=day_idx, key="creator_day_sel")
-
-            def_hour = int(st.session_state.get("c_hour", 19))
-            selected_hour = st.slider("Publishing Hour (0-23):", 0, 23, def_hour, 1, key="creator_hour_sel")
-
-            if "carousel" in selected_format.lower():
-                def_slides = int(st.session_state.get("c_slides", 5))
-                selected_slides = st.slider("Carousel Slides:", 2, 10, def_slides, 1, key="creator_slides_sel")
-                selected_duration = 0.0
-            elif any(f in selected_format.lower() for f in ["reel", "short", "spotlight", "video"]):
-                def_dur = float(st.session_state.get("c_duration", 30.0))
-                selected_duration = float(st.slider("Duration (seconds):", 5, 90, int(def_dur), 5, key="creator_dur_sel"))
-                selected_slides = 1
-            else:
-                selected_duration = 0.0
-                selected_slides = 1
-
-            def_cta = bool(st.session_state.get("c_cta", True))
-            selected_cta = st.checkbox("Include Call-to-Action (CTA)", value=def_cta, key="creator_cta_sel")
-
-    # Primary Action Button
-    forecast_clicked = st.button("🚀 Forecast & Get AI Analysis", type="primary", width="stretch")
-
-    # If executed or previously run
-    if forecast_clicked:
-        get_cached_pipelines()
-
-        styles = st.session_state.get(
-            "c_styles",
-            [ContentStyle.EDUCATIONAL.value, ContentStyle.ENTERTAINING.value]
-        )
-        caption_len = int(st.session_state.get("c_caption_len", 250))
-        hashtags = int(st.session_state.get("c_hashtags", 6))
-
-        profile_dict = {
-            "platform": selected_plat,
-            "username": c_uname,
-            "full_name": c_fname,
-            "country": c_country,
-            "total_followers": c_followers,
-            "total_following": c_following,
-            "total_media_posts": c_posts,
-            "account_age_years": 4.0,
-            "posting_frequency_per_week": 3.5,
-            "is_verified": False,
-            "account_category": c_cat,
-        }
-        post_dict = {
-            "platform": selected_plat,
-            "media_type": selected_format,
-            "category": selected_cat,
-            "categorizations": styles,
-            "categorization": styles[0],
-            "caption_length_chars": caption_len,
-            "hashtags_count": hashtags,
-            "mentions_count": 1,
-            "has_call_to_action": selected_cta,
-            "video_duration_seconds": selected_duration,
-            "carousel_slide_count": selected_slides,
-            "video_title_length": 60,
-            "thumbnail_has_face": True,
-            "screenshot_count": 15 if selected_plat == PlatformType.SNAPCHAT.value else 0,
-            "posted_hour_of_day": selected_hour,
-            "posted_day_of_week": selected_day,
-            "demographics": {
-                "top_country": c_country,
-                "primary_age_group": "25-34",
-                "gender_female_pct": 0.52,
-                "gender_male_pct": 0.48,
-            },
-        }
-
-        success, errs, sim_res = run_post_simulation(profile_dict, post_dict)
-        if not success or sim_res is None:
-            st.error(f"Simulation error: {', '.join(errs)}")
-        else:
-            sim_dict = format_simulation_for_interpretation(
-                sim_res,
-                profile_data=profile_dict,
-                post_data=post_dict,
-                platform=selected_plat,
-                media_format=selected_format,
-            )
-            interpretation = interpret_simulation_result(sim_dict, prompt=user_prompt)
-            st.session_state["last_creator_interpretation"] = interpretation
-            st.session_state["last_creator_sim_res"] = sim_res
-            st.session_state["last_creator_platform"] = selected_plat
-
-    # Render results if available
-    if "last_creator_interpretation" in st.session_state:
-        interpretation = st.session_state["last_creator_interpretation"]
-        sim_res = st.session_state["last_creator_sim_res"]
-        selected_plat = st.session_state.get("last_creator_platform", PlatformType.INSTAGRAM.value)
-
-        st.divider()
-
-        # Dynamic platform-specific metric labels
-        if selected_plat == PlatformType.YOUTUBE.value:
-            metric_reach_label = "Projected Reach"
-            metric_imp_label = "Projected Views"
-        elif selected_plat == PlatformType.SNAPCHAT.value:
-            metric_reach_label = "Snap Reach"
-            metric_imp_label = "Snap Views"
-        else:
-            metric_reach_label = "Projected Reach"
-            metric_imp_label = "Projected Impressions"
-
-        # Clean KPI Summary Cards
-        st.markdown("### 📊 Performance Forecast Summary")
-        k1, k2, k3, k4 = st.columns(4)
-        with k1:
-            st.metric(
-                metric_reach_label,
-                f"{interpretation['predicted_reach']:,}",
-                help=f"Safe window: {interpretation['reach_80_ci'][0]:,} – {interpretation['reach_80_ci'][1]:,}"
-            )
-            st.caption(f"Safe Range: {format_number(interpretation['reach_80_ci'][0])} – {format_number(interpretation['reach_80_ci'][1])}")
-        with k2:
-            st.metric(
-                metric_imp_label,
-                f"{interpretation['predicted_impressions']:,}",
-                help=f"Upper bound: up to {interpretation['impressions_90_ci'][1]:,}"
-            )
-            st.caption(f"Upper Ceiling: up to {format_number(interpretation['impressions_90_ci'][1])}")
-        with k3:
-            st.metric("Engagement Rate", f"{interpretation['engagement_rate']:.1f}%")
-            st.caption(f"Saves: {sim_res.projected_save_rate:.2f}% | Shares: {sim_res.projected_share_rate:.2f}%")
-        with k4:
-            st.metric("Virality Tier", interpretation["virality_tier"])
-            st.caption(f"Virality Score: {sim_res.virality_score:.4f}")
-
-        st.divider()
-
-        # Conversational AI Strategist Performance Briefing
-        st.markdown("### 🤖 Conversational AI Strategist Performance Briefing")
-        st.markdown(f"#### {interpretation['headline']}")
-
-        # Intuitive Real-Time Prompt-Response Dialogue
-        if user_prompt and user_prompt.strip():
-            st.markdown(f"> 💬 **Creator Idea / Query:** *\"{user_prompt.strip()}\"*")
-
-        st.markdown(interpretation["executive_summary"])
-
-        # Key Algorithmic Boosts & Opportunities
-        st.markdown("#### 🌳 Key Algorithmic Boosts & Opportunities")
-        b_col, o_col = st.columns(2)
-        with b_col:
-            st.markdown("##### 🟢 Algorithmic Boosts")
-            boosts = interpretation["driver_breakdown"].get("boosts", [])
-            if boosts:
-                for b in boosts:
-                    st.success(f"**+{b['impact']:,} Reach (+{b['pct']:.1f}%)** • {b['summary']}")
-            else:
-                st.info("Baseline balanced algorithmic distribution.")
-        with o_col:
-            st.markdown("##### ⚠️ Improvement Opportunities")
-            opps = interpretation["driver_breakdown"].get("opportunities", [])
-            if opps:
-                for o in opps:
-                    st.warning(f"**-{abs(o['impact']):,} Reach ({o['pct']:.1f}%)** • {o['summary']}")
-            else:
-                st.success("No significant algorithmic distribution penalties detected!")
-
-        # Actionable Strategic Tips
-        st.markdown("#### 💡 Actionable Strategic Steps Before You Publish")
-        for idx, tip in enumerate(interpretation["actionable_tips"], 1):
-            st.info(f"**{idx}.** {tip}")
-
-        # Friendly Confidence Window
-        st.markdown("#### 🛡️ Safe Confidence Window")
-        st.markdown(f"> {interpretation['confidence_summary']}")
-
-        # Full Briefing Dialogue Markdown Expander
-        with st.expander("📋 View Complete AI Strategist Briefing Transcript", expanded=False):
-            st.markdown(interpretation["dialogue_markdown"])
-
-# =============================================================================
-# 🔬 PRO / DATA SCIENTIST MODE - Full 4 Engineering Diagnostic Tabs
-# =============================================================================
-else:
-    # Custom header
-    st.title("⚡ Instagram AI Analytics & Prediction Engine")
-    st.caption("Machine learning forecasting, post simulation, and audience analytics with real-time guardrails.")
-    st.info("ℹ️ **Model & Benchmark Transparency**: GBDT pipelines are calibrated on a 750-sample benchmark dataset ($R^2 \\approx 0.84$). Mondrian conformal intervals quantify coverage over this benchmark distribution. Live Meta Graph API accounts import verified profile metrics, while what-if simulation models projected response across creative levers.")
-
-    tabs = st.tabs([
-        "🔍 NLP Profile Analytics & Search",
-        "🎯 What-If Post Performance Simulator",
-        "📊 Industry Benchmarks & Demographics",
-        "🛡️ Engine Guardrails & Model Health"
-    ])
-
-    # =============================================================================
-    # TAB 1: NLP Profile Analytics & Discovery
-    # =============================================================================
-    with tabs[0]:
-        st.subheader("Natural Language Account & Media Search")
-        st.markdown("Query profiles and media performance using natural language. The engine parses filters, checks safety guardrails, and triggers predictive models.")
-
-        # Live Meta Graph API Ingestion Connector Expander
-        with st.expander("🔗 Connect Live Instagram Account via Meta Graph API", expanded=False):
-            st.markdown(
-                "Connect an authentic **Instagram Creator or Business Account** to stream live profile statistics, "
-                "media insights, and audience demographics directly into the prediction engine."
-            )
-
-            st.info(
-                "🔑 **Required Meta Permissions:** Ensure your Meta User Access Token is granted: "
-                "`instagram_basic`, `instagram_manage_insights`, `pages_show_list`, and `pages_read_engagement`."
-            )
-
-            meta_tok_col, meta_btn_col = st.columns([4, 2])
-            with meta_tok_col:
-                meta_token_input = st.text_input(
-                    "Meta User Access Token:",
-                    type="password",
-                    value=st.session_state.get("meta_user_token", ""),
-                    placeholder="EAAB... (Paste User Token from Graph API Explorer)",
-                    help="Requires a valid Meta Graph API User or System User Access Token.",
-                )
-                if meta_token_input:
-                    st.session_state["meta_user_token"] = meta_token_input
-
-            with meta_btn_col:
-                st.write("")
-                st.write("")
-                discover_clicked = st.button("🔍 Auto-Discover from Pages", width="stretch")
-
-            # Optional Long-Lived Token Exchange sub-expander
-            with st.expander("🔄 Exchange for 60-Day Long-Lived Token (Optional)", expanded=False):
-                ex_col1, ex_col2, ex_col3 = st.columns([2, 2, 2])
-                with ex_col1:
-                    app_id_val = st.text_input("Meta App ID:", placeholder="e.g. 123456789012345")
-                with ex_col2:
-                    app_secret_val = st.text_input("Meta App Secret:", type="password", placeholder="e.g. 98a7b6c5...")
-                with ex_col3:
-                    st.write("")
-                    st.write("")
-                    exchange_clicked = st.button("Generate Long-Lived Token", width="stretch")
-
-                if exchange_clicked:
-                    if not meta_token_input:
-                        st.error("Please provide a short-lived user access token first.")
-                    elif not app_id_val or not app_secret_val:
-                        st.error("Please enter both Meta App ID and App Secret.")
-                    else:
-                        try:
-                            ex_client = InstagramGraphAPIClient(
-                                access_token=meta_token_input,
-                                app_id=app_id_val,
-                                app_secret=app_secret_val,
-                            )
-                            long_res = ex_client.exchange_for_long_lived_token()
-                            st.session_state["meta_user_token"] = long_res.get("access_token", meta_token_input)
-                            exp_days = round(long_res.get("expires_in", 5184000) / 86400, 1)
-                            st.success(f"Successfully generated long-lived token (valid for ~{exp_days} days)!")
-                        except MetaGraphAPIError as ex_err:
-                            st.error(str(ex_err))
-
-            if discover_clicked:
-                if not meta_token_input.strip():
-                    st.error("Please input a Meta User Access Token before running auto-discovery.")
-                else:
-                    try:
-                        with st.spinner("Connecting to Facebook Pages & querying Instagram Business accounts..."):
-                            disc_client = InstagramGraphAPIClient(access_token=meta_token_input)
-                            found_accounts = disc_client.get_connected_instagram_accounts()
-                            if not found_accounts:
-                                st.warning("No linked Instagram Creator/Business accounts found. Confirm your Facebook Page has an Instagram account connected.")
-                            else:
-                                st.session_state["discovered_ig_accounts"] = found_accounts
-                                st.success(f"Discovered {len(found_accounts)} connected Instagram account(s)!")
-                    except MetaGraphAPIError as mg_err:
-                        st.error(str(mg_err))
-
-            selected_account_id = None
-            discovered_list = st.session_state.get("discovered_ig_accounts", [])
-            if discovered_list:
-                account_labels = [
-                    f"@{acc['username']} ({acc.get('name', '')}) [ID: {acc.get('instagram_account_id') or acc.get('id', '')}]"
-                    for acc in discovered_list
-                ]
-                chosen_acc_label = st.selectbox(
-                    "Select Instagram Account to Ingest:",
-                    account_labels,
-                    index=0,
-                )
-                chosen_entry = discovered_list[account_labels.index(chosen_acc_label)]
-                selected_account_id = chosen_entry.get("instagram_account_id") or chosen_entry.get("id")
-            else:
-                acc_id_manual = st.text_input(
-                    "Instagram Account ID (or auto-discover above):",
-                    value=st.session_state.get("manual_ig_account_id", ""),
-                    placeholder="e.g. 17841405822304914",
-                    help="Your Instagram Business/Creator Account numeric ID.",
-                )
-                if acc_id_manual:
-                    st.session_state["manual_ig_account_id"] = acc_id_manual
-                    selected_account_id = acc_id_manual.strip()
-
-            fetch_creator_clicked = st.button("🚀 Fetch Live Creator Data & Insights", type="primary", width="stretch")
-
-            if fetch_creator_clicked:
-                if not meta_token_input.strip():
-                    st.error("Please provide a valid Meta User Access Token.")
-                elif not selected_account_id:
-                    st.error("Please select or specify a connected Instagram Account ID.")
-                else:
-                    try:
-                        with st.spinner("Streaming live profile, insights, and media objects from Meta Graph API..."):
-                            client = InstagramGraphAPIClient(access_token=meta_token_input)
-                            live_profile, live_demographics, live_media = client.fetch_full_creator_state(selected_account_id)
-                            st.session_state["live_creator_profile"] = live_profile
-                            st.session_state["live_creator_demographics"] = live_demographics
-                            st.session_state["live_creator_media"] = live_media
-                            st.success(f"Successfully ingested live data for @{live_profile.username}!")
-                    except MetaGraphAPIError as mg_err:
-                        st.error(f"Meta Graph API Error: {mg_err}")
-                    except Exception as gen_err:
-                        st.error(f"Unexpected connection error: {gen_err}")
-
-            if "live_creator_profile" in st.session_state:
-                lp = st.session_state["live_creator_profile"]
-                ld = st.session_state.get("live_creator_demographics", Demographics())
-                lm = st.session_state.get("live_creator_media", [])
-
-                st.divider()
-                c_avatar, c_info, c_m1, c_m2, c_m3 = st.columns([1, 2.5, 1.2, 1.2, 1.2])
-                with c_avatar:
-                    pfp = getattr(lp, "profile_picture_url", None)
-                    if pfp:
-                        st.image(pfp, width=100)
-                    else:
-                        st.markdown("📸 *(No Avatar)*")
-                with c_info:
-                    st.markdown(f"### @{lp.username}")
-                    st.write(f"**{lp.full_name}**")
-                    bio = getattr(lp, "biography", "")
-                    if bio:
-                        st.caption(bio[:160] + ("..." if len(bio) > 160 else ""))
-                with c_m1:
-                    st.metric("Followers", f"{lp.total_followers:,}")
-                with c_m2:
-                    following_val = lp.raw_following if getattr(lp, "raw_following", None) is not None else lp.total_following
-                    st.metric("Following", f"{following_val:,}")
-                with c_m3:
-                    st.metric("Media Posts", f"{lp.total_media_posts:,}")
-
-                if getattr(lp, "prior_metrics_estimated", False):
-                    st.info("ℹ️ **Data Ingestion Transparency**: Follower count, media posts, bio, and recent metrics are live from Meta Graph API. Secondary prior features (account age, 30-day growth rate) use standard baseline estimates.")
-
-                # Demographic Split
-                st.markdown("#### 👥 Live Audience Demographics (Meta Insights)")
-                d1, d2, d3, d4 = st.columns(4)
-                with d1:
-                    st.metric("Top Country", f"🌍 {ld.top_country}")
-                with d2:
-                    st.metric("Secondary Country", f"🌐 {ld.secondary_country}")
-                with d3:
-                    st.metric("Dominant Age Bracket", f"🎂 {ld.primary_age_group}")
-                with d4:
-                    st.metric(
-                        "Gender Distribution",
-                        f"♀️ {ld.gender_female_pct * 100:.1f}% / ♂️ {ld.gender_male_pct * 100:.1f}%",
-                    )
-
-                # Recent Media Cards
-                if lm:
-                    st.markdown("#### 📸 Recent Media Posts Performance")
-                    media_cols = st.columns(min(len(lm), 3))
-                    for i, post_item in enumerate(lm[:6]):
-                        with media_cols[i % len(media_cols)]:
-                            with st.container(border=True):
-                                st.markdown(
-                                    f"**{post_item.media_type.value}** • `{post_item.posted_day_of_week} {post_item.posted_hour_of_day}:00`"
-                                )
-                                c_text = getattr(post_item, "caption", "") or ""
-                                if c_text:
-                                    st.caption(f"\"{c_text[:110]}...\"" if len(c_text) > 110 else f"\"{c_text}\"")
-                                m_reach = post_item.metrics.reach if (post_item.metrics and post_item.metrics.reach is not None) else "N/A"
-                                m_likes = post_item.metrics.likes if post_item.metrics else 0
-                                m_comms = post_item.metrics.comments if post_item.metrics else 0
-                                m_shares = post_item.metrics.shares if post_item.metrics else 0
-                                reach_disp = f"{m_reach:,}" if isinstance(m_reach, int) else m_reach
-                                st.write(f"🎯 **Reach:** {reach_disp}")
-                                st.write(f"❤️ {m_likes:,} | 💬 {m_comms:,} | 🔄 {m_shares:,}")
-                                p_url = getattr(post_item, "permalink", None)
-                                if p_url:
-                                    st.link_button("🔗 View on Instagram", p_url, width="stretch")
-
-                st.write("")
-                if st.button("📥 Load into What-If Simulator", type="primary", width="stretch"):
-                    st.session_state["simulator_profile_mode"] = "🔗 Live Connected Creator Profile"
-                    st.success("✅ Creator baseline & audience demographics transferred to Tab 2! Open Tab 2 to simulate posts.")
-
-        # Sidebar Quick Queries
-        st.sidebar.header("💡 Example Queries")
-        examples = [
-            "Give me accounts above 50 million followers",
-            "Sports accounts with followers above 5m and engagement above 1.5%",
-            "Reels in US with engagement rate above 2%",
-            "Predict reach for cristiano",
-            "Predict reach and impressions for sports accounts",
-            "Top 10 accounts by followers",
-            "Health & Fitness carousels with engagement > 2%",
-            "Music accounts in India"
-        ]
-        selected_example = st.sidebar.radio("Quick Prompts:", ["(Custom Prompt)"] + examples)
-        default_prompt = "" if selected_example == "(Custom Prompt)" else selected_example
-
-        col_input, col_btn = st.columns([5, 1])
-        with col_input:
-            user_nlp_prompt = st.text_input(
-                "Enter requirement:",
-                value=default_prompt,
-                placeholder="e.g. Predict reach for sports accounts with more than 10M followers",
-                label_visibility="collapsed"
-            )
-        with col_btn:
-            search_clicked = st.button("🚀 Analyze", type="primary", width="stretch")
-
-        if search_clicked or user_nlp_prompt:
-            if not user_nlp_prompt.strip():
-                st.warning("Please enter a query or select an example prompt.")
+    with st.expander("Import from Meta Graph API (observed insights only)"):
+        st.caption("Needs a token with instagram_basic and instagram_manage_insights. Fields Meta does not return are left empty. "
+                   "impressions is not available in current API versions. Hours are UTC. "
+                   "total_followers is the CURRENT count, not the count at post time.")
+        token = st.text_input("Access token", type="password")
+        acct = st.text_input("Instagram account ID")
+        limit = st.number_input("Posts to fetch", 1, 100, 25)
+        if st.button("Fetch"):
+            if not token or not acct:
+                st.error("Token and account ID are required.")
             else:
                 try:
-                    with st.spinner("Processing NLP query & applying guardrails..."):
-                        get_cached_pipelines()
-                        parsed_query, results_df = run_analytics_pipeline(user_nlp_prompt, df=get_cached_dataset())
+                    prof, rows = InstagramGraphAPIClient(access_token=token).fetch_creator_snapshot(acct, media_limit=int(limit))
+                    st.session_state["meta_rows"] = pd.DataFrame(rows)
+                    st.success(f"Fetched @{prof.username} ({prof.total_followers:,} followers) and {len(rows)} posts.")
+                except MetaGraphAPIError as e:
+                    st.error(str(e))
+        if "meta_rows" in st.session_state:
+            fetched = st.session_state["meta_rows"]
+            st.dataframe(fetched, width="stretch")
+            n_reach = int(fetched["per_media_reach"].notna().sum()) if "per_media_reach" in fetched else 0
+            st.write(f"{n_reach} of {len(fetched)} fetched posts have observed reach (only those can be used for training).")
+            st.download_button("Download as CSV", sanitize_dataframe_for_csv(fetched).to_csv(index=False), "meta_posts.csv", "text/csv")
+            if st.button("Append to data/posts.csv"):
+                st.success(f"Appended {append_posts_csv(fetched)} new rows (existing rows untouched).")
 
-                    # Query Specifications & NLP Auditor Card
-                    with st.expander("🔍 NLP Query Auditor & Strategic Intent Analysis", expanded=True):
-                        c_aud1, c_aud2, c_aud3, c_aud4 = st.columns(4)
-                        with c_aud1:
-                            score = parsed_query.audit_report.clarity_score if parsed_query.audit_report else 80
-                            st.metric("Prompt Clarity Score", f"{score}%")
-                        with c_aud2:
-                            goal = parsed_query.intent.primary_goal if parsed_query.intent else "General"
-                            st.write("**Detected Strategic Goal:**")
-                            st.info(f"🎯 {goal}")
-                        with c_aud3:
-                            tier = parsed_query.intent.creator_tier if parsed_query.intent else "Any"
-                            st.write("**Creator Scale:**")
-                            st.info(f"⭐ {tier}")
-                        with c_aud4:
-                            aud = parsed_query.intent.audience_focus if parsed_query.intent else "Broad"
-                            st.write("**Target Audience:**")
-                            st.info(f"👥 {aud}")
+# ------------------------------------------------------------------ CREATORS
+with tab_creators:
+    st.subheader("Search observed creator data")
+    st.caption("Examples: `over 10m followers`, `followers between 1m and 5m`, `engagement above 2%`, `top 10 by engagement`, `@cristiano`, `category sports`.")
+    if profiles is None:
+        st.warning("No creator profile data.")
+    else:
+        q = st.text_input("Query", "")
+        parsed, rows, notes = run_creator_query(q, profiles)
+        if parsed.understood:
+            st.caption("Applied: " + "; ".join(parsed.understood))
+        for w in parsed.warnings + notes:
+            st.warning(w)
+        if parsed.safety_flags:
+            st.info("Input contained unusual content: " + ", ".join(parsed.safety_flags))
+        summary = observed_post_summary(posts)
+        if summary is not None:
+            rows = rows.merge(summary, on="username", how="left")
+        st.write(f"{len(rows)} of {len(profiles)} creators match.")
+        st.dataframe(rows, hide_index=True, width="stretch")
 
-                        c_filt, c_sug = st.columns(2)
-                        with c_filt:
-                            st.markdown("**Extracted Entities & Dimensional Filters:**")
-                            st.json(parsed_query.filters)
-                        with c_sug:
-                            st.markdown("**NLP Auditor Insights & Refinements:**")
-                            if parsed_query.audit_report and parsed_query.audit_report.refinement_suggestions:
-                                for sug in parsed_query.audit_report.refinement_suggestions:
-                                    st.caption(f"💡 {sug}")
-                            else:
-                                st.caption("✅ Prompt is highly specific and well-structured.")
+# ------------------------------------------------------------------ FORECAST
+with tab_forecast:
+    if not model_available():
+        st.info("No trained model yet. Add real post-level data on the Data tab and train. Until then no forecast is shown: "
+                "nothing is estimated without data.")
+    else:
+        try:
+            bundle, meta = load_model()
+        except (NoModelError, SecurityError, ModelVersionError) as e:
+            st.error(str(e))
+            st.stop()
+        sup, spec = meta["support"], meta["features"]
+        st.caption(f"Trained on {meta['data']['n_posts']} posts from {meta['data']['n_creators']} creators; "
+                   f"followers {sup['followers_min']:,} to {sup['followers_max']:,}.")
 
-                            if parsed_query.audit_report and parsed_query.audit_report.audit_feedback:
-                                st.write(f"*{parsed_query.audit_report.audit_feedback}*")
-
-                    # KPI Summary
-                    st.divider()
-                    st.markdown(f"### Matching Results: **{len(results_df):,}** items")
-
-                    if results_df.empty:
-                        st.warning("No records matched your criteria. Try loosening numeric thresholds or changing category terms.")
-                    else:
-                        k1, k2, k3, k4 = st.columns(4)
-                        with k1:
-                            st.metric("Total Matches", f"{len(results_df):,}")
-                        with k2:
-                            avg_f = results_df["total_followers"].mean()
-                            st.metric("Avg Followers", format_number(avg_f))
-                        with k3:
-                            avg_er = results_df["engagement_rate"].mean()
-                            st.metric("Avg Engagement Rate", format_percentage(avg_er))
-                        with k4:
-                            if "predicted_reach" in results_df.columns:
-                                avg_pr = results_df["predicted_reach"].mean()
-                                st.metric("Avg Predicted Reach", format_number(avg_pr))
-                            elif "predicted_impressions" in results_df.columns:
-                                avg_pi = results_df["predicted_impressions"].mean()
-                                st.metric("Avg Predicted Impressions", format_number(avg_pi))
-                            else:
-                                avg_likes = results_df["per_media_likes"].mean()
-                                st.metric("Avg Likes / Post", format_number(avg_likes))
-
-                        # Formatted Data Table
-                        display_cols = [
-                            "username", "platform", "media_type", "category", "categorization",
-                            "total_followers", "top_country", "engagement_rate", "virality_score",
-                            "per_media_likes", "per_media_shares", "per_media_saves"
-                        ]
-                        for col_name in ["predicted_reach", "predicted_impressions", "hashtags_count", "caption_length_chars", "reach_from_explore_pct", "per_media_video_views"]:
-                            if col_name in results_df.columns:
-                                display_cols.append(col_name)
-
-                        valid_cols = [c for c in display_cols if c in results_df.columns]
-                        table_df = results_df[valid_cols].copy()
-
-                        col_configs = {
-                            "username": st.column_config.TextColumn("Handle"),
-                            "platform": st.column_config.TextColumn("Platform"),
-                            "media_type": st.column_config.TextColumn("Media"),
-                            "category": st.column_config.TextColumn("Category"),
-                            "categorization": st.column_config.TextColumn("Style"),
-                            "total_followers": st.column_config.NumberColumn("Followers", format="%d"),
-                            "top_country": st.column_config.TextColumn("Country"),
-                            "engagement_rate": st.column_config.NumberColumn("Engagement", format="%.4f"),
-                            "virality_score": st.column_config.NumberColumn("Virality Index", format="%.4f"),
-                            "per_media_likes": st.column_config.NumberColumn("Likes", format="%d"),
-                            "per_media_shares": st.column_config.NumberColumn("Shares", format="%d"),
-                            "per_media_saves": st.column_config.NumberColumn("Saves", format="%d"),
-                            "hashtags_count": st.column_config.NumberColumn("Hashtags", format="%d"),
-                            "caption_length_chars": st.column_config.NumberColumn("Caption Len", format="%d"),
-                            "reach_from_explore_pct": st.column_config.NumberColumn("Explore %", format="%.2f"),
-                            "per_media_video_views": st.column_config.NumberColumn("Video Views", format="%d")
-                        }
-                        if "predicted_reach" in table_df.columns:
-                            col_configs["predicted_reach"] = st.column_config.NumberColumn("🎯 Predicted Reach", format="%d")
-                        if "predicted_impressions" in table_df.columns:
-                            col_configs["predicted_impressions"] = st.column_config.NumberColumn("👁️ Predicted Impressions", format="%d")
-
-                        st.dataframe(table_df, column_config=col_configs, width="stretch", hide_index=True)
-
-                        sanitized_csv_df = sanitize_dataframe_for_csv(table_df)
-                        csv_bytes = sanitized_csv_df.to_csv(index=False).encode("utf-8")
-                        st.download_button("📥 Export Results to CSV", csv_bytes, "instagram_analytics_results.csv", "text/csv")
-
-                except Exception as e:
-                    st.error(f"Execution error: {str(e)}")
-
-    # =============================================================================
-    # TAB 2: What-If Post Performance Simulator
-    # =============================================================================
-    with tabs[1]:
-        st.subheader("🎯 What-If Post Performance Simulator")
-        st.markdown("Forecast projected Reach, Impressions, Engagement, and Virality **before publishing a post**.")
-
-        raw_df = get_cached_dataset()
-        unique_creators = sorted(raw_df["username"].unique().tolist())
-
-        sim_col1, sim_col2 = st.columns([1, 1])
-
-        with sim_col1:
-            st.markdown("#### 1. Profile Context")
-            profile_options = ["Existing Creator from Database", "Custom Profile"]
-            if "live_creator_profile" in st.session_state:
-                profile_options.append("🔗 Live Connected Creator Profile")
-
-            default_mode = st.session_state.get("simulator_profile_mode", profile_options[0])
-            mode_idx = profile_options.index(default_mode) if default_mode in profile_options else 0
-            profile_mode = st.radio("Select Profile Source:", profile_options, index=mode_idx, horizontal=True)
-
-            if profile_mode == "Existing Creator from Database":
-                chosen_user = st.selectbox("Choose Account:", unique_creators, index=0)
-                user_row = raw_df[raw_df["username"] == chosen_user].iloc[0]
-                sim_followers = int(user_row["total_followers"])
-                sim_following = int(user_row["total_following"])
-                sim_posts = int(user_row["total_media_posts"])
-                sim_cat = user_row["account_category"]
-                sim_country = user_row["country"]
-                sim_age_years = float(user_row.get("account_age_years", 4.0))
-                sim_freq = float(user_row.get("posting_frequency_per_week", 3.5))
-                st.caption(f"**Followers:** {sim_followers:,} | **Following:** {sim_following:,} | **Category:** {sim_cat} | **Age:** {sim_age_years} yrs")
-            elif profile_mode == "🔗 Live Connected Creator Profile":
-                live_p = st.session_state["live_creator_profile"]
-                live_d = st.session_state.get("live_creator_demographics", Demographics())
-                sim_followers = int(live_p.total_followers)
-                sim_following = int(live_p.total_following)
-                sim_posts = int(live_p.total_media_posts)
-                sim_cat = live_p.account_category.value
-                sim_country = live_d.top_country
-                sim_age_years = 4.0
-                sim_freq = 3.5
-                st.caption(
-                    f"**Live Creator:** @{live_p.username} ({live_p.full_name}) | "
-                    f"**Followers:** {sim_followers:,} | **Following:** {sim_following:,} | **Country:** {sim_country}"
-                )
-            else:
-                sim_followers = st.number_input("Total Followers:", min_value=100, max_value=1_000_000_000, value=250_000, step=10_000)
-                sim_following = st.number_input("Total Following (Max 7,500):", min_value=0, max_value=7500, value=450, step=50)
-                sim_posts = st.number_input("Total Media Posts:", min_value=1, max_value=50_000, value=350, step=10)
-                sim_cat = st.selectbox("Account Category:", [c.value for c in ContentCategory], index=0)
-                sim_country = st.selectbox("Account Country:", ["US", "IN", "BR", "GB", "ES", "CA", "FR", "DE"], index=0)
-                sim_age_years = 4.0
-                sim_freq = 3.5
-
-        with sim_col2:
-            st.markdown("#### 2. Planned Media Specifications")
-            chosen_platform = st.selectbox(
-                "Platform:",
-                [PlatformType.INSTAGRAM.value, PlatformType.YOUTUBE.value, PlatformType.SNAPCHAT.value],
-                index=0,
-                help="Select the destination platform to calibrate platform-specific algorithms and creative constraints."
-            )
-
-            platform_formats = {
-                PlatformType.INSTAGRAM.value: [
-                    MediaType.REEL.value,
-                    MediaType.CAROUSEL.value,
-                    MediaType.STATIC_IMAGE.value,
-                    MediaType.STORY.value,
-                    MediaType.VIDEO.value,
-                ],
-                PlatformType.YOUTUBE.value: [
-                    MediaType.YOUTUBE_SHORT.value,
-                    MediaType.YOUTUBE_VIDEO.value,
-                    MediaType.COMMUNITY_POST.value,
-                ],
-                PlatformType.SNAPCHAT.value: [
-                    MediaType.SNAPCHAT_SPOTLIGHT.value,
-                    MediaType.SNAPCHAT_STORY.value,
-                    MediaType.SNAPCHAT_POST.value,
-                ],
-            }
-
-            available_formats = platform_formats.get(chosen_platform, [m.value for m in MediaType])
-            chosen_media_type = st.selectbox("Media Format:", available_formats, index=0)
-            chosen_post_cat = st.selectbox("Post Topic / Category:", [c.value for c in ContentCategory], index=0)
-            chosen_styles = st.multiselect(
-                "Content Styles / Categorizations:",
-                options=[s.value for s in ContentStyle],
-                default=[ContentStyle.EDUCATIONAL.value, ContentStyle.ENTERTAINING.value]
-            )
-            if not chosen_styles:
-                chosen_styles = [ContentStyle.ENTERTAINING.value]
-
-            st.markdown("#### 3. Target Demographics")
-            demo_col1, demo_col2, demo_col3 = st.columns(3)
-            with demo_col1:
-                countries_list = ["US", "IN", "BR", "GB", "ES", "CA", "FR", "DE"]
-                def_country = "US"
-                if profile_mode == "🔗 Live Connected Creator Profile" and "live_creator_demographics" in st.session_state:
-                    def_country = st.session_state["live_creator_demographics"].top_country
-                if def_country not in countries_list:
-                    countries_list.insert(0, def_country)
-                demo_country = st.selectbox("Top Country:", countries_list, index=countries_list.index(def_country))
-            with demo_col2:
-                age_list = ["18-24", "25-34", "35-44", "45+"]
-                def_age = "25-34"
-                if profile_mode == "🔗 Live Connected Creator Profile" and "live_creator_demographics" in st.session_state:
-                    def_age = st.session_state["live_creator_demographics"].primary_age_group
-                if def_age not in age_list:
-                    age_list.insert(0, def_age)
-                demo_age = st.selectbox("Primary Age:", age_list, index=age_list.index(def_age))
-            with demo_col3:
-                def_female = 0.52
-                if profile_mode == "🔗 Live Connected Creator Profile" and "live_creator_demographics" in st.session_state:
-                    def_female = float(st.session_state["live_creator_demographics"].gender_female_pct)
-                demo_female = st.slider("Female %:", 0.0, 1.0, def_female, 0.05)
-
-        # Advanced Granular Post & Scheduling Parameters
-        with st.expander("⚙️ Advanced Granular Post & Content Parameters", expanded=False):
-            adv_col1, adv_col2, adv_col3 = st.columns(3)
-            with adv_col1:
-                sim_caption_len = st.slider("Caption Length (chars):", 20, 2200, 250, 50)
-                sim_hashtags = st.slider("Hashtags Count:", 0, 30, 6, 1)
-                # Platform-specific creative inputs
-                if chosen_platform == PlatformType.YOUTUBE.value:
-                    sim_video_title_len = st.slider("Video Title Length (chars):", 10, 100, 60, 5, help="Length of YouTube video or short title")
-                    sim_thumb_face = st.checkbox("Thumbnail Has Face", value=True, help="YouTube thumbnails with expressive faces drive higher CTR")
-                    sim_screenshots = 0
-                elif chosen_platform == PlatformType.SNAPCHAT.value:
-                    sim_screenshots = int(st.number_input("Screenshot Count / Rate:", min_value=0, max_value=5000, value=15, help="Audience screenshot frequency"))
-                    sim_video_title_len = 60
-                    sim_thumb_face = True
-                else:
-                    sim_video_title_len = 60
-                    sim_thumb_face = True
-                    sim_screenshots = 0
-
-            with adv_col2:
-                sim_cta = st.checkbox("Explicit Call-to-Action (CTA)", value=True, help="Prompts saves, shares, or comments")
-                sim_mentions = st.number_input("Tagged Handles / Mentions:", min_value=0, max_value=10, value=1)
-                if chosen_media_type == "Reel":
-                    sim_video_sec = float(st.slider("Video Duration (seconds):", 5, 90, 30, 5))
-                    sim_slides = 1
-                elif chosen_media_type == "Video":
-                    sim_video_sec = float(st.slider("Video Duration (seconds):", 30, 600, 120, 15))
-                    sim_slides = 1
-                elif chosen_media_type == "YouTube Short":
-                    sim_video_sec = float(st.slider("Short Duration (seconds):", 5, 60, 30, 5))
-                    sim_slides = 1
-                elif chosen_media_type == "YouTube Video":
-                    sim_video_sec = float(st.slider("Video Duration (seconds):", 60, 1800, 480, 30))
-                    sim_slides = 1
-                elif chosen_media_type == "Snapchat Spotlight":
-                    sim_video_sec = float(st.slider("Spotlight Duration (seconds):", 5, 60, 15, 5))
-                    sim_slides = 1
-                elif chosen_media_type == "Snapchat Story":
-                    sim_video_sec = float(st.slider("Story Duration (seconds):", 3, 15, 10, 1))
-                    sim_slides = 1
-                elif chosen_media_type == "Carousel":
-                    sim_slides = int(st.slider("Carousel Slide Count:", 2, 10, 5, 1))
-                    sim_video_sec = 0.0
-                else:
-                    sim_video_sec = 0.0
-                    sim_slides = 1
-            with adv_col3:
-                sim_hour = st.slider("Posting Hour (0-23):", 0, 23, 18, 1)
-                sim_day = st.selectbox("Posting Day:", ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"], index=2)
-
-        simulate_btn = st.button("🚀 Run Post Performance Forecast", type="primary", width="stretch")
-
-        if simulate_btn:
-            get_cached_pipelines()
-            creator_uname = "simulated_creator"
-            creator_fname = "Simulated Creator"
-            if profile_mode == "🔗 Live Connected Creator Profile" and "live_creator_profile" in st.session_state:
-                creator_uname = st.session_state["live_creator_profile"].username
-                creator_fname = st.session_state["live_creator_profile"].full_name
-            elif profile_mode == "Existing Creator from Database":
-                creator_uname = chosen_user
-                creator_fname = chosen_user
-
-            profile_dict = {
-                "platform": chosen_platform,
-                "username": creator_uname,
-                "full_name": creator_fname,
-                "country": sim_country,
-                "total_followers": sim_followers,
-                "total_following": sim_following,
-                "total_media_posts": sim_posts,
-                "account_age_years": sim_age_years,
-                "posting_frequency_per_week": sim_freq,
-                "is_verified": False,
-                "account_category": sim_cat
-            }
-            post_dict = {
-                "platform": chosen_platform,
-                "media_type": chosen_media_type,
-                "category": chosen_post_cat,
-                "categorizations": chosen_styles,
-                "categorization": chosen_styles[0],
-                "caption_length_chars": sim_caption_len,
-                "hashtags_count": sim_hashtags,
-                "mentions_count": sim_mentions,
-                "has_call_to_action": sim_cta,
-                "video_duration_seconds": sim_video_sec,
-                "carousel_slide_count": sim_slides,
-                "video_title_length": sim_video_title_len,
-                "thumbnail_has_face": sim_thumb_face,
-                "screenshot_count": sim_screenshots,
-                "posted_hour_of_day": sim_hour,
-                "posted_day_of_week": sim_day,
-                "demographics": {
-                    "top_country": demo_country,
-                    "primary_age_group": demo_age,
-                    "gender_female_pct": demo_female,
-                    "gender_male_pct": round(1.0 - demo_female, 4)
-                }
-            }
-
-            success, errs, sim_res = run_post_simulation(profile_dict, post_dict)
-
-            if not success:
-                st.error(f"Validation failed: {', '.join(errs)}")
-            else:
-                st.divider()
-                st.markdown("### 📊 Forecasted Performance & Confidence Intervals")
-
-                # Conformal Prediction & Epistemic Uncertainty Status Banner
-                uq_col1, uq_col2, uq_col3 = st.columns([1.2, 1.2, 1.6])
-                with uq_col1:
-                    st.info(f"🏷️ **Mondrian Tier:** {sim_res.calibration_tier}")
-                with uq_col2:
-                    st.success(f"🛡️ **Guarantee:** {sim_res.prediction_interval_coverage}")
-                with uq_col3:
-                    if "⚠️" in sim_res.uncertainty_rating:
-                        st.warning(f"**Epistemic Check:** {sim_res.uncertainty_rating}")
-                    else:
-                        st.info(f"**Epistemic Check:** {sim_res.uncertainty_rating}")
-
-                # Dynamic platform-specific metric labels
-                if chosen_platform == PlatformType.YOUTUBE.value:
-                    metric_reach_label = "Projected Reach"
-                    metric_imp_label = "Projected Views & Reach"
-                elif chosen_platform == PlatformType.SNAPCHAT.value:
-                    metric_reach_label = "Snap Reach"
-                    metric_imp_label = "Snap Views & Reach"
-                else:
-                    metric_reach_label = "Projected Reach"
-                    metric_imp_label = "Projected Impressions"
-
-                p1, p2, p3, p4 = st.columns(4)
-                with p1:
-                    st.metric(
-                        metric_reach_label,
-                        f"{sim_res.projected_reach.point_estimate:,}",
-                        help=f"Conformal Range: [{sim_res.projected_reach.lower:,} — {sim_res.projected_reach.upper:,}]"
-                    )
-                    st.caption(f"Range: {format_number(sim_res.projected_reach.lower)} – {format_number(sim_res.projected_reach.upper)}")
-                with p2:
-                    st.metric(
-                        metric_imp_label,
-                        f"{sim_res.projected_impressions.point_estimate:,}",
-                        help=f"Conformal Range: [{sim_res.projected_impressions.lower:,} — {sim_res.projected_impressions.upper:,}]"
-                    )
-                    st.caption(f"Range: {format_number(sim_res.projected_impressions.lower)} – {format_number(sim_res.projected_impressions.upper)}")
-                with p3:
-                    st.metric("Engagement Rate", f"{sim_res.projected_engagement_rate:.2f}%")
-                    st.caption(f"Saves: {sim_res.projected_save_rate:.2f}% | Shares: {sim_res.projected_share_rate:.2f}%")
-                with p4:
-                    st.metric("Virality Tier", sim_res.virality_tier)
-                    st.caption(f"Virality Score: {sim_res.virality_score:.4f}")
-
-                # Exact Combinatorial Shapley Attribution / Creative Feature Attribution Waterfall
-                explanations = sim_res.feature_explanations
-                if not explanations:
-                    # Fallback if not populated on simulation result
-                    try:
-                        prof_obj = ProfileInput(**profile_dict)
-                        post_obj = PostInput(**post_dict)
-                        explanations = explain_post_prediction(post=post_obj, profile=prof_obj)
-                    except Exception:
-                        explanations = None
-
-                if explanations and "drivers" in explanations:
-                    base_reach = explanations["base_reach"]
-                    final_reach = explanations["final_reach"]
-                    drivers = explanations["drivers"]
-
-                    st.markdown("#### 🌳 Creative Choice Explainability & Algorithmic Levers (Exact Combinatorial Shapley Attribution Waterfall)")
-
-                    measures = ["absolute"] + ["relative"] * len(drivers) + ["total"]
-                    x_labels = ["Baseline Creator Reach"] + [d["name"] for d in drivers] + ["Final Forecasted Reach"]
-                    y_values = [base_reach] + [d["impact"] for d in drivers] + [0]
-
-                    text_labels = [f"{base_reach:,}"]
-                    for d in drivers:
-                        sign = "+" if d["impact"] >= 0 else ""
-                        text_labels.append(f"{sign}{d['impact']:,}<br>({sign}{d['pct']:.1f}%)")
-                    text_labels.append(f"{final_reach:,}")
-
-                    fig_waterfall = go.Figure(go.Waterfall(
-                        name="Reach Attribution",
-                        orientation="v",
-                        measure=measures,
-                        x=x_labels,
-                        y=y_values,
-                        text=text_labels,
-                        textposition="outside",
-                        decreasing={"marker": {"color": "#E74C3C"}},  # Red/Amber for negative penalties
-                        increasing={"marker": {"color": "#2ECC71"}},  # Green for positive drivers
-                        totals={"marker": {"color": "#3498DB"}},      # Blue for baseline & final
-                        connector={"line": {"color": "#7F8C8D", "width": 1, "dash": "dot"}},
-                    ))
-
-                    fig_waterfall.update_layout(
-                        title={
-                            "text": "<b>Algorithmic Reach Contribution by Creative Choice</b>",
-                            "x": 0.02,
-                            "xanchor": "left"
-                        },
-                        waterfallgap=0.25,
-                        height=460,
-                        margin=dict(l=20, r=20, t=50, b=40),
-                        yaxis_title="Projected Reach",
-                        xaxis_title="Creative Choice Lever",
-                        showlegend=False
-                    )
-
-                    st.plotly_chart(fig_waterfall, width="stretch")
-
-                    st.caption(
-                        "💡 **How Algorithmic Levers Work:** The **Baseline Creator Reach** is the expected reach if this creator published an unoptimized static post during off-peak hours. "
-                        "Each creative choice (Media Format, Peak Timing, Hashtags, Call-to-Action, and Content Styles) acts as an algorithmic lever that either accelerates (green) or dampens (red) distribution based on our Exact Combinatorial Shapley Attribution model (evaluating 64 coalitions across 6 creative levers)."
-                    )
-
-                    with st.expander("📋 Detailed Creative Factor Impact Breakdown", expanded=False):
-                        driver_records = []
-                        for d in drivers:
-                            sign = "+" if d["impact"] >= 0 else ""
-                            driver_records.append({
-                                "Creative Lever": d["name"],
-                                "Reach Impact": f"{sign}{d['impact']:,}",
-                                "Relative Lift (%)": f"{sign}{d['pct']:.2f}%",
-                                "Direction": "🟢 Positive Driver" if d["direction"] == "positive" else "🔴 Penalty / Suboptimal",
-                                "Algorithmic Rationale": d["description"]
-                            })
-                        st.dataframe(pd.DataFrame(driver_records), width="stretch", hide_index=True)
-
-                # Detailed Conformal Interval Diagnostics
-                with st.expander("🔍 Conformal Uncertainty & Mathematical Coverage Diagnostics", expanded=False):
-                    st.markdown(
-                        """
-                        **What is Mondrian Conformal Prediction?**
-                        Unlike standard machine learning models that produce brittle point predictions or assume Gaussian errors,
-                        our engine applies **Mondrian (Group-Conditional) Inductive Conformal Prediction**.
-                        - **Finite-Sample Guarantee**: The true reach and impressions will fall inside these intervals with at least **80% mathematical probability**.
-                        - **Tier-Calibrated**: Quantiles are independently calibrated for Nano, Micro, Macro, and Mega accounts to prevent over-conservative intervals on small accounts.
-                        """
-                    )
-                    diag_col1, diag_col2 = st.columns(2)
-                    with diag_col1:
-                        st.markdown(
-                            f"""
-                            **Reach Interval Spread:**
-                            - **Conservative Floor (Lower):** `{sim_res.projected_reach.lower:,}`
-                            - **Expected Baseline (Point):** `{sim_res.projected_reach.point_estimate:,}`
-                            - **Optimistic Ceiling (Upper):** `{sim_res.projected_reach.upper:,}`
-                            - **Spread Factor:** `{(sim_res.projected_reach.upper / max(sim_res.projected_reach.lower, 1)):.2f}x`
-                            """
-                        )
-                    with diag_col2:
-                        st.markdown(
-                            f"""
-                            **Impressions Interval Spread:**
-                            - **Conservative Floor (Lower):** `{sim_res.projected_impressions.lower:,}`
-                            - **Expected Baseline (Point):** `{sim_res.projected_impressions.point_estimate:,}`
-                            - **Optimistic Ceiling (Upper):** `{sim_res.projected_impressions.upper:,}`
-                            - **Spread Factor:** `{(sim_res.projected_impressions.upper / max(sim_res.projected_impressions.lower, 1)):.2f}x`
-                            """
-                        )
-
-                st.markdown("#### 💡 Algorithmic Optimization Recommendations")
-                for tip in sim_res.optimization_tips:
-                    st.info(tip)
-
-    # =============================================================================
-    # TAB 3: Industry Benchmarks & Demographic Insights
-    # =============================================================================
-    with tabs[2]:
-        st.subheader("📊 Industry Benchmarks & Demographic Insights")
-        st.markdown("Explore cross-category performance distributions and engagement drivers across the dataset.")
-
-        df_bench = get_cached_dataset()
-
-        b_col1, b_col2 = st.columns(2)
-        with b_col1:
-            # Reach by Media Type
-            fig_media = px.box(
-                df_bench,
-                x="media_type",
-                y="per_media_reach",
-                color="media_type",
-                title="Distribution of Post Reach by Media Type",
-                log_y=True,
-                labels={"per_media_reach": "Reach (Log Scale)", "media_type": "Media Format"}
-            )
-            st.plotly_chart(fig_media, width="stretch")
-
-        with b_col2:
-            # Engagement Rate by Category
-            cat_agg = df_bench.groupby("category")["engagement_rate"].mean().reset_index()
-            cat_agg["engagement_rate_pct"] = cat_agg["engagement_rate"] * 100
-            fig_cat = px.bar(
-                cat_agg.sort_values(by="engagement_rate_pct", ascending=True),
-                x="engagement_rate_pct",
-                y="category",
-                orientation="h",
-                title="Average Engagement Rate (%) by Topic Category",
-                labels={"engagement_rate_pct": "Engagement Rate (%)", "category": "Topic"}
-            )
-            st.plotly_chart(fig_cat, width="stretch")
-
-        b_col3, b_col4 = st.columns(2)
-        with b_col3:
-            # Demographic Age Distribution
-            age_counts = df_bench["primary_age_group"].value_counts().reset_index()
-            age_counts.columns = ["Age Group", "Posts"]
-            fig_age = px.pie(
-                age_counts,
-                names="Age Group",
-                values="Posts",
-                title="Audience Primary Age Group Breakdown",
-                hole=0.4
-            )
-            st.plotly_chart(fig_age, width="stretch")
-
-        with b_col4:
-            # Virality vs Saves by Media Style
-            fig_scatter = px.scatter(
-                df_bench,
-                x="per_media_saves",
-                y="per_media_shares",
-                color="categorization",
-                size="total_followers",
-                hover_data=["username", "media_type"],
-                title="Shares vs. Saves by Content Categorization",
-                log_x=True,
-                log_y=True,
-                labels={"per_media_saves": "Saves (Log)", "per_media_shares": "Shares (Log)"}
-            )
-            st.plotly_chart(fig_scatter, width="stretch")
-
-    # =============================================================================
-    # TAB 4: Engine Guardrails & Model Health
-    # =============================================================================
-    with tabs[3]:
-        st.subheader("🛡️ Engine Guardrails, Safety Rules & Model Metadata")
-        st.markdown("Review system architecture, active platform guardrails, and model validation metrics.")
-
-        meta = get_cached_metadata()
-        get_cached_pipelines()
-
-        g_col1, g_col2 = st.columns(2)
-
-        with g_col1:
-            st.markdown("#### 1. Active Platform & Business Logic Guardrails")
-            st.success("✅ **Instagram Following Constraint**: Maximum following capped at 7,500 per platform limit.")
-            st.success("✅ **Mathematical Metric Invariant**: Reach strictly $\\le$ Impressions ($Reach \\le Impressions$).")
-            st.success("✅ **Interaction Invariant**: Likes & Saves strictly $\\le$ Impressions.")
-            st.success("✅ **Bot / Fake Follower Detector**: Triggers warning if engagement $< 0.05\\%$ for accounts $>100K$ followers.")
-            st.success("✅ **Adversarial Prompt Sanitizer**: Neutralizes prompt injection, SQL injection, and `<script>` injections.")
-
-        with g_col2:
-            st.markdown("#### 2. Cross-Validation & Error Residuals")
-            reach_cv = meta.get("evaluation", {}).get("reach", {})
-            imp_cv = meta.get("evaluation", {}).get("impressions", {})
-
-            r_r2 = reach_cv.get("group_cv_r2_mean", reach_cv.get("cv_r2_mean", 0.85))
-            r_mae = reach_cv.get("group_cv_mae_mean", reach_cv.get("cv_mae_mean", 0.0))
-            r_q80 = reach_cv.get("conformal_quantile_80", reach_cv.get("residual_std", 0.35))
-
-            i_r2 = imp_cv.get("group_cv_r2_mean", imp_cv.get("cv_r2_mean", 0.82))
-            i_mae = imp_cv.get("group_cv_mae_mean", imp_cv.get("cv_mae_mean", 0.0))
-            i_q80 = imp_cv.get("conformal_quantile_80", imp_cv.get("residual_std", 0.35))
-
-            st.info(f"**Reach Pipeline**: 5-Fold Group CV $R^2$ = `{r_r2:.4f}` | MAE = `{r_mae:,.0f}` | Conformal $q_{{80}}$ = `{r_q80:.4f}`")
-            st.info(f"**Impressions Pipeline**: 5-Fold Group CV $R^2$ = `{i_r2:.4f}` | MAE = `{i_mae:,.0f}` | Conformal $q_{{80}}$ = `{i_q80:.4f}`")
-            st.caption(f"Model Artifact Version: **{meta.get('version', '2.0.0')}** | Target: **{meta.get('target_transformation', 'log1p / expm1')}** | Trained: {meta.get('trained_at', 'N/A')[:19]}")
-
-        # SHA-256 Model Integrity & Artifact Verification Section
-        st.markdown("#### 🔒 SHA-256 Model Integrity & Artifact Verification")
-        artifact_hashes = meta.get("artifact_hashes", {})
-        if artifact_hashes:
-            hash_records = []
-            for art_name, art_hash in artifact_hashes.items():
-                if art_name.endswith(".joblib") or "_" in art_name:
-                    hash_records.append({
-                        "Artifact Name": art_name,
-                        "Integrity Status": "✅ Verified Intact",
-                        "SHA-256 Digest": art_hash
-                    })
-            if hash_records:
-                st.dataframe(pd.DataFrame(hash_records), width="stretch", hide_index=True)
-            else:
-                st.success("✅ Model artifact SHA-256 checksums verified against model registry.")
+        c1, c2, c3 = st.columns(3)
+        platform = c1.selectbox("Platform", sup["platforms"])
+        formats = [m for m in sup["media_types"] if platform_of(m).value == platform]
+        media = c2.selectbox("Format", formats)
+        creator = None
+        if profiles is not None:
+            names = ["(enter followers manually)"] + profiles[profiles["platform"] == platform]["username"].tolist()
+            pick = c3.selectbox("Use a creator's follower count", names)
+            if pick != names[0]:
+                creator = profiles[profiles["username"] == pick].iloc[0]
+        if creator is not None:
+            followers, username = int(creator["total_followers"]), str(creator["username"])
+            st.write(f"Followers (from data): **{followers:,}**")
         else:
-            st.success("✅ Model artifact SHA-256 checksums verified against model registry.")
+            followers = st.number_input("Followers", min_value=1, value=None, step=1, placeholder="required")
+            username = "forecast"
 
-        st.markdown("#### 3. Enterprise Machine Learning Pipeline Architecture")
-        st.code("""
-Raw Input (Profile + Media + Demographics)
-   │
-   ▼
-[ Guardrails & Pydantic v2 Validation ]
-   │
-   ▼
-[ ColumnTransformer: Numeric (StandardScaler) + Categorical (OneHotEncoder) ]
-   │
-   ▼
-[ HistGradientBoostingRegressor Ensembles (Reach & Impressions) ]
-   │
-   ▼
-[ Invariant Check (Reach <= Impressions) & Residual Confidence Interval Generator ]
-   │
-   ▼
-[ Mondrian Conformal Inductive Quantiles (80% & 90% Intervals) ]
-   │
-   ▼
-Output: Point Estimates + Coverage Bounds + Exact Combinatorial Shapley Attribution & AI Strategist Dialogue
-""", language="text")
+        d1, d2 = st.columns(2)
+        day = d1.selectbox("Day", DAYS_OF_WEEK)
+        hour = d2.number_input("Hour (same convention as your data)", 0, 23, 12)
+
+        st.write("Optional details - leave blank if unknown; blanks are reported, never filled.")
+        opt = {}
+        cols = st.columns(3)
+        used = spec["optional_used"]
+        for i, c in enumerate(used):
+            with cols[i % 3]:
+                if c == "has_call_to_action":
+                    v = st.selectbox("Has call to action", ["Not provided", "Yes", "No"])
+                    opt[c] = None if v == "Not provided" else v == "Yes"
+                else:
+                    opt[c] = st.number_input(c.replace("_", " ").capitalize(), min_value=0.0, value=None, placeholder="not provided")
+        if spec["optional_dropped"]:
+            with st.expander("Details the model does not use, and why"):
+                st.write(spec["optional_dropped"])
+        compare = st.checkbox("Also compare all formats the model knows for this platform")
+
+        if st.button("Forecast", type="primary"):
+            if followers is None:
+                st.error("Followers is required.")
+            else:
+                try:
+                    clean = {k: (int(v) if k in ("caption_length_chars", "hashtags_count", "mentions_count", "carousel_slide_count") and v is not None else v)
+                             for k, v in opt.items()}
+                    prof_in = ProfileInput(username=username, platform=PlatformType(platform), total_followers=int(followers))
+                    post_in = PostInput(media_type=media, posted_day_of_week=day, posted_hour_of_day=int(hour), **clean)
+                    f = forecast_post(prof_in, post_in)
+
+                    st.subheader("Forecast")
+                    m1, m2 = st.columns(2)
+                    m1.metric("Reach (point estimate)", format_number(f.reach_80.point_estimate))
+                    if f.impressions_80:
+                        m2.metric("Impressions (point estimate)", format_number(f.impressions_80.point_estimate))
+                    rows = [{"Metric": "Reach", "Level": "80%", "Lower": f.reach_80.lower, "Upper": f.reach_80.upper},
+                            {"Metric": "Reach", "Level": "90%", "Lower": f.reach_90.lower, "Upper": f.reach_90.upper}]
+                    if f.impressions_80 and f.impressions_90:
+                        rows += [{"Metric": "Impressions", "Level": "80%", "Lower": f.impressions_80.lower, "Upper": f.impressions_80.upper},
+                                 {"Metric": "Impressions", "Level": "90%", "Lower": f.impressions_90.lower, "Upper": f.impressions_90.upper}]
+                    st.dataframe(pd.DataFrame(rows), hide_index=True, width="stretch")
+                    st.caption(f"Interval calibration: {f.reach_80.calibration}")
+
+                    st.write(f"**Model:** {f.model_name}{' (baseline - no richer model beat it)' if f.model_is_baseline else ''}. "
+                             f"On held-out creators its typical multiplicative error was about x{1 + f.heldout_median_abs_pct_error:.2f}.")
+                    if f.empirical_coverage_80 is not None:
+                        st.write(f"**Measured interval coverage on held-out creators:** {f.empirical_coverage_80:.0%} (nominal 80%), "
+                                 f"{f.empirical_coverage_90:.0%} (nominal 90%).")
+                    if f.imputed_fields:
+                        st.warning("Not provided, so the model filled these from its training data: " + ", ".join(f.imputed_fields))
+                    if f.extrapolated_fields:
+                        st.warning("Outside the training range: " + "; ".join(f.extrapolated_fields))
+                    with st.expander("Limits of this forecast"):
+                        for n in f.notes:
+                            st.write("- " + n)
+
+                    if compare:
+                        alt = forecast_formats(prof_in, post_in)
+                        st.subheader("Same post under other formats (model comparison, not a causal claim)")
+                        st.dataframe(pd.DataFrame([{"Format": k, "Reach": v.reach_80.point_estimate,
+                                                    "80% lower": v.reach_80.lower, "80% upper": v.reach_80.upper}
+                                                   for k, v in alt.items()]), hide_index=True, width="stretch")
+                except OutOfSupportError as e:
+                    st.error(f"No forecast: {e}")
+                except Exception as e:  # validation errors etc. - shown verbatim
+                    st.error(str(e))
+
+# ------------------------------------------------------------------ MODEL REPORT
+with tab_report:
+    if not model_available():
+        st.info("No model trained.")
+    else:
+        try:
+            meta = load_metadata()
+        except Exception as e:
+            st.error(str(e))
+            st.stop()
+        d, r = meta["data"], meta["reach"]
+        st.write(f"Trained {meta['trained_at']} on **{d['n_posts']}** posts from **{d['n_creators']}** creators "
+                 f"(median {d['posts_per_creator_median']:.0f} posts per creator). Data fingerprint `{d['training_frame_sha256'][:16]}...`.")
+        st.subheader("Reach: candidates on held-out creators")
+        st.dataframe(pd.DataFrame(r["candidates"]).T, width="stretch")
+        st.write(f"**Selected:** {r['selected']}  |  improvement vs baseline: {r['relative_improvement_vs_baseline']:.1%}")
+        st.caption(r["selection_rule"])
+        v = r["interval_validation"]
+        st.subheader("Interval validation")
+        if v.get("available"):
+            st.write(f"80% intervals covered **{v['measured_80_mean']:.1%}** (sd {v['measured_80_std']:.1%}, worst {v['measured_80_min']:.1%}); "
+                     f"90% intervals covered **{v['measured_90_mean']:.1%}** (sd {v['measured_90_std']:.1%}, worst {v['measured_90_min']:.1%}) "
+                     f"over {v['repeats']} repeats.")
+            st.write("By follower tier (80% interval):", v["measured_80_by_tier_global_interval"])
+            st.caption(v["note"])
+            if not v["intervals_reliable"]:
+                st.error("Measured coverage is below nominal: intervals are optimistic.")
+        else:
+            st.warning("Coverage could not be validated with this amount of data.")
+        st.subheader("Calibration")
+        st.dataframe(pd.DataFrame(r["calibration"]["tiers"]).T, width="stretch")
+        st.subheader("Impressions")
+        st.write(meta["impressions"].get("reason") or f"Modelled on {meta['impressions']['n_rows']} rows; selected {meta['impressions']['selected']}.")
+        st.subheader("Features")
+        st.write("Used:", meta["features"]["numeric"] + meta["features"]["categorical"])
+        st.write("Not used:", meta["features"]["optional_dropped"])
+        st.subheader("Software / integrity")
+        st.json({"software": meta["software"], "artifact_sha256": meta.get("artifact_sha256")})
+        with st.expander("What these forecasts can and cannot tell you"):
+            for n in meta["limits"]:
+                st.write("- " + n)

@@ -1,387 +1,190 @@
+"""
+Strict, deterministic query parser.
+
+It turns explicit constraints into filters and reports everything else. If a phrase looks like a
+constraint but cannot be applied (or refers to data that does not exist), a warning is emitted, so a
+partially understood query never silently returns unfiltered results. No intent is guessed.
+
+Supported (all applied conjunctively):
+  followers:        "over 1m followers", "followers between 10k and 50k", "at most 500k followers", "5m+ followers"
+  engagement rate:  "engagement above 2%", "engagement rate between 1% and 3%"
+  average likes:    "avg likes over 1m", "average likes at least 500k"
+  handle:           "@username"
+  category text:    "category sports" / "in the music category"   (substring match on the reported category)
+  ranking:          "top 10", "top 5 by engagement", "top 20 by average likes"
+"""
+
 import html
 import re
-from typing import Any, Dict, List, Optional
-from ..schemas import ParsedQuery, ContentCategory, MediaType, ContentStyle
+from typing import Any, Dict, List, Tuple
+
+from ..config import settings
 from ..guardrails.safety import sanitize_prompt
-from .intent_analyzer import analyze_query_intent
-from .auditor import audit_query
+from ..schemas import ParsedQuery
 
-COUNTRY_LOOKUP = {
-    "united states": "US", "usa": "US", "us": "US", "america": "US",
-    "spain": "ES", "es": "ES",
-    "india": "IN", "in": "IN",
-    "brazil": "BR", "brasil": "BR", "br": "BR",
-    "united kingdom": "GB", "uk": "GB", "great britain": "GB", "england": "GB", "gb": "GB",
-    "canada": "CA", "ca": "CA",
-    "france": "FR", "fr": "FR",
-    "australia": "AU", "au": "AU",
-    "germany": "DE", "de": "DE",
-    "italy": "IT", "it": "IT",
-    "mexico": "MX", "mx": "MX",
-    "united arab emirates": "AE", "uae": "AE", "dubai": "AE", "ae": "AE"
-}
+_NUM = r"((?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?)"
+_UNIT = r"(k|thousand|m|mil|million|b|bil|billion)?"
+_OPS = [
+    (r"more than|greater than|higher than|above|over|>", ">"),
+    (r"at least|minimum|min|>=", ">="),
+    (r"less than|fewer than|lower than|below|under|<", "<"),
+    (r"at most|maximum|max|up to|<=", "<="),
+]
+_OP_RE = "(" + "|".join(p for p, _ in _OPS) + ")"
+_MULT = {"k": 1e3, "thousand": 1e3, "m": 1e6, "mil": 1e6, "million": 1e6, "b": 1e9, "bil": 1e9, "billion": 1e9}
 
-CATEGORY_SYNONYMS = {
-    "sports": ContentCategory.SPORTS.value,
-    "football": ContentCategory.SPORTS.value,
-    "soccer": ContentCategory.SPORTS.value,
-    "cricket": ContentCategory.SPORTS.value,
-    "fitness": ContentCategory.HEALTH_FITNESS.value,
-    "health": ContentCategory.HEALTH_FITNESS.value,
-    "workout": ContentCategory.HEALTH_FITNESS.value,
-    "finance": ContentCategory.FINANCE_BUSINESS.value,
-    "business": ContentCategory.FINANCE_BUSINESS.value,
-    "crypto": ContentCategory.FINANCE_BUSINESS.value,
-    "money": ContentCategory.FINANCE_BUSINESS.value,
-    "fashion": ContentCategory.FASHION_BEAUTY.value,
-    "beauty": ContentCategory.FASHION_BEAUTY.value,
-    "makeup": ContentCategory.FASHION_BEAUTY.value,
-    "tech": ContentCategory.SCIENCE_TECHNOLOGY.value,
-    "technology": ContentCategory.SCIENCE_TECHNOLOGY.value,
-    "science": ContentCategory.SCIENCE_TECHNOLOGY.value,
-    "gadgets": ContentCategory.SCIENCE_TECHNOLOGY.value,
-    "travel": ContentCategory.TRAVEL_EVENTS.value,
-    "events": ContentCategory.TRAVEL_EVENTS.value,
-    "tourism": ContentCategory.TRAVEL_EVENTS.value,
-    "food": ContentCategory.FOOD_DINING.value,
-    "dining": ContentCategory.FOOD_DINING.value,
-    "cooking": ContentCategory.FOOD_DINING.value,
-    "recipe": ContentCategory.FOOD_DINING.value,
-    "music": ContentCategory.MUSIC_ENTERTAINMENT.value,
-    "entertainment": ContentCategory.MUSIC_ENTERTAINMENT.value,
-    "comedy": ContentCategory.MUSIC_ENTERTAINMENT.value,
-    "education": ContentCategory.EDUCATION_CAREERS.value,
-    "career": ContentCategory.EDUCATION_CAREERS.value,
-    "learning": ContentCategory.EDUCATION_CAREERS.value
-}
-
-MEDIA_TYPE_SYNONYMS = {
-    "reels": MediaType.REEL.value,
-    "reel": MediaType.REEL.value,
-    "carousels": MediaType.CAROUSEL.value,
-    "carousel": MediaType.CAROUSEL.value,
-    "static images": MediaType.STATIC_IMAGE.value,
-    "static image": MediaType.STATIC_IMAGE.value,
-    "photos": MediaType.STATIC_IMAGE.value,
-    "photo": MediaType.STATIC_IMAGE.value,
-    "stories": MediaType.STORY.value,
-    "story": MediaType.STORY.value,
-    "video": MediaType.VIDEO.value,
-    "videos": MediaType.VIDEO.value,
-    "youtube shorts": MediaType.YOUTUBE_SHORT.value,
-    "youtube short": MediaType.YOUTUBE_SHORT.value,
-    "shorts": MediaType.YOUTUBE_SHORT.value,
-    "short": MediaType.YOUTUBE_SHORT.value,
-    "youtube video": MediaType.YOUTUBE_VIDEO.value,
-    "youtube videos": MediaType.YOUTUBE_VIDEO.value,
-    "community post": MediaType.COMMUNITY_POST.value,
-    "community posts": MediaType.COMMUNITY_POST.value,
-    "snapchat spotlight": MediaType.SNAPCHAT_SPOTLIGHT.value,
-    "spotlight": MediaType.SNAPCHAT_SPOTLIGHT.value,
-    "snapchat story": MediaType.SNAPCHAT_STORY.value,
-    "snapchat stories": MediaType.SNAPCHAT_STORY.value,
-    "snapchat post": MediaType.SNAPCHAT_POST.value,
-    "snapchat posts": MediaType.SNAPCHAT_POST.value,
-    "snap": MediaType.SNAPCHAT_POST.value,
-    "snaps": MediaType.SNAPCHAT_POST.value,
-}
+# Concepts users ask for that this dataset does not contain. Reported, never guessed.
+_UNSUPPORTED = ["country", "countries", "gender", "female", "male", "age group", "audience", "morning", "evening",
+                "afternoon", "night", "weekend", "weekday", "last month", "this year", "reach", "impressions",
+                "saves", "shares", "virality", "viral"]
 
 
-def _parse_multiplier(unit: Optional[str]) -> float:
-    if not unit:
-        return 1.0
-    u = unit.lower().strip()
-    if u in ["k", "thousand"]:
-        return 1_000.0
-    if u in ["m", "mil", "million"]:
-        return 1_000_000.0
-    if u in ["b", "bil", "billion"]:
-        return 1_000_000_000.0
-    return 1.0
+_TOPICS = ("sports|music|fashion|beauty|gaming|comedy|entertainment|movies|fitness|food|travel|tech|technology|"
+           "education|business|finance|dance|animals|cars|art|science|news|kids")
+
+_COUNTRIES = (
+    "india|usa|america|united states|united kingdom|uk|england|britain|canada|australia|germany|france|spain|italy|"
+    "brazil|mexico|japan|china|korea|russia|turkey|indonesia|nigeria|egypt|argentina|colombia|pakistan|bangladesh|"
+    "philippines|vietnam|thailand|saudi arabia|uae|dubai|netherlands|sweden|norway|poland|ukraine|south africa|"
+    "new zealand|ireland|portugal|chile|peru|kenya|morocco|iran|israel|greece|belgium|switzerland|austria|denmark|finland"
+)
 
 
-def _parse_op(word: str) -> str:
-    w = html.unescape(word.lower().strip())
-    if w in ["above", "over", "more than", "greater than", "higher than", ">"]:
-        return ">"
-    if w in ["at least", "min", "minimum", ">="]:
-        return ">="
-    if w in ["below", "under", "less than", "fewer than", "lower than", "<"]:
-        return "<"
-    if w in ["at most", "max", "maximum", "up to", "<="]:
-        return "<="
-    return ">="
+def _op(word: str) -> str:
+    w = html.unescape(word.strip().lower())
+    for pat, sym in _OPS:
+        if re.fullmatch(pat, w):
+            return sym
+    raise ValueError(word)
 
 
-def _parse_num(num_str: str) -> float:
-    return float(num_str.replace(",", "").strip())
+def _num(txt: str, unit: str) -> float:
+    return float(txt.replace(",", "")) * _MULT.get((unit or "").lower(), 1.0)
 
 
-_OP_PATTERN = r"(above|over|more than|greater than|higher than|below|under|less than|fewer than|lower than|at least|at most|min|max|up to|>=|<=|>|<|&gt;=|&lt;=|&gt;|&lt;)"
-_NUM_PATTERN = r"((?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?)"
-_FOLLOWER_UNITS = r"(k|m|mil|million|thousand|b|bil|billion)?"
+def _blank(text: str, span: Tuple[int, int]) -> str:
+    return text[:span[0]] + " " * (span[1] - span[0]) + text[span[1]:]
 
 
 def parse_query(prompt: str) -> ParsedQuery:
-    """
-    Parses a user query with localized clause evaluation, guardrail checks,
-    and returns a validated ParsedQuery schema.
-    """
-    sanitized, safety_flags = sanitize_prompt(prompt)
-    text_lower = sanitized.lower()
+    _, safety_flags = sanitize_prompt(prompt)          # flags only; parsing uses the user's own text
+    text = html.unescape((prompt or "").strip())[: settings.MAX_PROMPT_LENGTH].lower()
+    residual = text
     filters: Dict[str, Any] = {}
+    understood: List[str] = []
+    warnings: List[str] = []
 
-    # ---------------------------------------------------------
-    # 1. FOLLOWERS FILTER
-    # ---------------------------------------------------------
-    # Pattern A: between X and Y followers OR followers between X and Y
-    between_followers = re.search(
-        r"(?:(?:between|from)\s*"
-        rf"{_NUM_PATTERN}\s*{_FOLLOWER_UNITS}\s*(?:and|to)\s*{_NUM_PATTERN}\s*{_FOLLOWER_UNITS}\s*followers?|"
-        r"followers?\s*(?:between|from)\s*"
-        rf"{_NUM_PATTERN}\s*{_FOLLOWER_UNITS}\s*(?:and|to)\s*{_NUM_PATTERN}\s*{_FOLLOWER_UNITS})",
-        text_lower
-    )
-    if between_followers:
-        if between_followers.group(1):
-            n1, u1, n2, u2 = between_followers.group(1), between_followers.group(2), between_followers.group(3), between_followers.group(4)
-        else:
-            n1, u1, n2, u2 = between_followers.group(5), between_followers.group(6), between_followers.group(7), between_followers.group(8)
-        v1 = _parse_num(n1) * _parse_multiplier(u1 or u2)
-        v2 = _parse_num(n2) * _parse_multiplier(u2)
-        filters["total_followers"] = {"operator": "between", "min": min(v1, v2), "max": max(v1, v2)}
-    else:
-        # Pattern B: (op) (num) (unit) followers
-        f_match = re.search(
-            rf"{_OP_PATTERN}\s*"
-            rf"{_NUM_PATTERN}\s*{_FOLLOWER_UNITS}\s*followers?",
-            text_lower
-        )
-        # Pattern C: followers (op) (num) (unit)
-        f_inv = re.search(
-            rf"followers?\s*{_OP_PATTERN}\s*"
-            rf"{_NUM_PATTERN}\s*{_FOLLOWER_UNITS}",
-            text_lower
-        )
-        # Pattern D: (num)(unit)+ followers
-        f_plus = re.search(
-            rf"{_NUM_PATTERN}\s*(k|m|mil|million|thousand|b|bil|billion)\s*(\+)?\s*followers?",
-            text_lower
-        )
+    def add_cond(key: str, cond: Dict[str, Any], label: str) -> None:
+        filters.setdefault(key, []).append(cond)
+        understood.append(label)
 
-        if f_match:
-            val = _parse_num(f_match.group(2)) * _parse_multiplier(f_match.group(3))
-            filters["total_followers"] = {"operator": _parse_op(f_match.group(1)), "value": val}
-        elif f_inv:
-            val = _parse_num(f_inv.group(2)) * _parse_multiplier(f_inv.group(3))
-            filters["total_followers"] = {"operator": _parse_op(f_inv.group(1)), "value": val}
-        elif f_plus:
-            val = _parse_num(f_plus.group(1)) * _parse_multiplier(f_plus.group(2))
-            filters["total_followers"] = {"operator": ">=", "value": val}
+    # ---- followers: between
+    for m in list(re.finditer(rf"followers?\s*(?:between|from)\s*{_NUM}\s*{_UNIT}\s*(?:and|to)\s*{_NUM}\s*{_UNIT}"
+                              rf"|(?:between|from)\s*{_NUM}\s*{_UNIT}\s*(?:and|to)\s*{_NUM}\s*{_UNIT}\s*followers?", residual)):
+        g = m.groups()
+        a, ua, b, ub = (g[0], g[1], g[2], g[3]) if g[0] else (g[4], g[5], g[6], g[7])
+        lo, hi = _num(a, ua or ub), _num(b, ub)
+        lo, hi = min(lo, hi), max(lo, hi)
+        add_cond("total_followers", {"operator": ">=", "value": lo}, f"followers >= {lo:,.0f}")
+        add_cond("total_followers", {"operator": "<=", "value": hi}, f"followers <= {hi:,.0f}")
+        residual = _blank(residual, m.span())
 
-    # ---------------------------------------------------------
-    # 2. ENGAGEMENT RATE FILTER
-    # ---------------------------------------------------------
-    eng_between = re.search(
-        r"(?:engagement|engagement rate|\ber\b)\s*(?:between|from)\s*(\d+(?:\.\d+)?)\s*%?\s*(?:and|to)\s*(\d+(?:\.\d+)?)\s*%?",
-        text_lower
-    )
-    if eng_between:
-        v1 = float(eng_between.group(1))
-        v2 = float(eng_between.group(2))
-        if v1 > 1.0 or v2 > 1.0:
-            v1 /= 100.0
-            v2 /= 100.0
-        filters["engagement_rate"] = {"operator": "between", "min": min(v1, v2), "max": max(v1, v2)}
-    else:
-        eng_match = re.search(
-            rf"(?:engagement|engagement rate|\ber\b)\s*{_OP_PATTERN}\s*(\d+(?:\.\d+)?)\s*%",
-            text_lower
-        )
-        eng_inv = re.search(
-            rf"{_OP_PATTERN}\s*(\d+(?:\.\d+)?)\s*%\s*(?:engagement|engagement rate|\ber\b)",
-            text_lower
-        )
-        eng_dec = re.search(
-            rf"(?:engagement|engagement rate|\ber\b)\s*{_OP_PATTERN}\s*(0\.\d+)",
-            text_lower
-        )
+    # ---- followers: "(op) N unit followers" and "followers (op) N unit"
+    for pat in (rf"{_OP_RE}\s*{_NUM}\s*{_UNIT}\s*followers?", rf"followers?\s*{_OP_RE}\s*{_NUM}\s*{_UNIT}"):
+        for m in list(re.finditer(pat, residual)):
+            op, n, u = m.group(1), m.group(2), m.group(3)
+            v = _num(n, u)
+            add_cond("total_followers", {"operator": _op(op), "value": v}, f"followers {_op(op)} {v:,.0f}")
+            residual = _blank(residual, m.span())
 
-        if eng_match:
-            filters["engagement_rate"] = {"operator": _parse_op(eng_match.group(1)), "value": float(eng_match.group(2)) / 100.0}
-        elif eng_inv:
-            filters["engagement_rate"] = {"operator": _parse_op(eng_inv.group(1)), "value": float(eng_inv.group(2)) / 100.0}
-        elif eng_dec:
-            filters["engagement_rate"] = {"operator": _parse_op(eng_dec.group(1)), "value": float(eng_dec.group(2))}
+    # ---- followers: "5m+ followers", "500k or more followers", "500 followers or more/less"
+    for m in list(re.finditer(rf"{_NUM}\s*(k|m|mil|million|thousand|b|bil|billion)?\s*(\+|or more|or above|or higher)\s*followers?"
+                              rf"|{_NUM}\s*(k|m|mil|million|thousand|b|bil|billion)?\s*followers?\s*(or more|or above|or higher|\+)", residual)):
+        g = m.groups()
+        n, u = (g[0], g[1]) if g[0] else (g[3], g[4])
+        v = _num(n, u)
+        add_cond("total_followers", {"operator": ">=", "value": v}, f"followers >= {v:,.0f}")
+        residual = _blank(residual, m.span())
+    for m in list(re.finditer(rf"{_NUM}\s*(k|m|mil|million|thousand|b|bil|billion)?\s*followers?\s*(or fewer|or less|or below|or lower)", residual)):
+        v = _num(m.group(1), m.group(2))
+        add_cond("total_followers", {"operator": "<=", "value": v}, f"followers <= {v:,.0f}")
+        residual = _blank(residual, m.span())
 
-    # ---------------------------------------------------------
-    # 3. PER-MEDIA REACH & METRICS NUMERIC FILTER
-    # ---------------------------------------------------------
-    reach_match = re.search(
-        rf"\breach\s*{_OP_PATTERN}\s*{_NUM_PATTERN}\s*{_FOLLOWER_UNITS}",
-        text_lower
-    )
-    reach_inv = re.search(
-        rf"{_OP_PATTERN}\s*{_NUM_PATTERN}\s*{_FOLLOWER_UNITS}\s*reach\b",
-        text_lower
-    )
-    if reach_match:
-        val = _parse_num(reach_match.group(2)) * _parse_multiplier(reach_match.group(3))
-        filters["per_media_reach"] = {"operator": _parse_op(reach_match.group(1)), "value": val}
-    elif reach_inv:
-        val = _parse_num(reach_inv.group(2)) * _parse_multiplier(reach_inv.group(3))
-        filters["per_media_reach"] = {"operator": _parse_op(reach_inv.group(1)), "value": val}
+    # ---- engagement rate (percent or decimal)
+    for m in list(re.finditer(rf"(?:engagement rate|engagement|\ber\b)\s*(?:between|from)\s*{_NUM}\s*%?\s*(?:and|to)\s*{_NUM}\s*%?", residual)):
+        a, b = float(m.group(1).replace(",", "")), float(m.group(2).replace(",", ""))
+        if a > 1 or b > 1 or "%" in m.group(0):
+            a, b = a / 100, b / 100
+        lo, hi = min(a, b), max(a, b)
+        add_cond("engagement_rate", {"operator": ">=", "value": lo}, f"engagement rate >= {lo:.2%}")
+        add_cond("engagement_rate", {"operator": "<=", "value": hi}, f"engagement rate <= {hi:.2%}")
+        residual = _blank(residual, m.span())
+    for m in list(re.finditer(rf"(?:engagement rate|engagement|\ber\b)\s*{_OP_RE}\s*{_NUM}\s*(%)?", residual)):
+        v = float(m.group(2).replace(",", ""))
+        v = v / 100 if (m.group(3) or v > 1) else v
+        add_cond("engagement_rate", {"operator": _op(m.group(1)), "value": v}, f"engagement rate {_op(m.group(1))} {v:.2%}")
+        residual = _blank(residual, m.span())
 
-    # ---------------------------------------------------------
-    # 4. MEDIA TYPE
-    # ---------------------------------------------------------
-    for kw, m_type in MEDIA_TYPE_SYNONYMS.items():
-        if re.search(r"\b" + re.escape(kw) + r"\b", text_lower):
-            filters["media_type"] = m_type
-            break
+    # ---- average likes
+    for m in list(re.finditer(rf"(?:avg\.?|average)\s*likes?\s*{_OP_RE}\s*{_NUM}\s*{_UNIT}", residual)):
+        v = _num(m.group(2), m.group(3))
+        add_cond("avg_likes", {"operator": _op(m.group(1)), "value": v}, f"average likes {_op(m.group(1))} {v:,.0f}")
+        residual = _blank(residual, m.span())
 
-    # ---------------------------------------------------------
-    # 5. CATEGORY
-    # ---------------------------------------------------------
-    for kw, cat_name in sorted(CATEGORY_SYNONYMS.items(), key=lambda x: -len(x[0])):
-        if re.search(r"\b" + re.escape(kw) + r"\b", text_lower):
-            filters["category"] = cat_name
-            break
+    # ---- handle
+    m = re.search(r"@([a-z0-9_\.]{2,30})", residual)
+    if m:
+        filters["username"] = m.group(1).rstrip(".")
+        understood.append(f"handle contains '{filters['username']}'")
+        residual = _blank(residual, m.span())
 
-    # ---------------------------------------------------------
-    # 6. COUNTRY
-    # ---------------------------------------------------------
-    for place, code in sorted(COUNTRY_LOOKUP.items(), key=lambda x: -len(x[0])):
-        pat = r"\b(?:in|from|country)\s+" + re.escape(place) + r"\b|\b" + re.escape(place) + r"\s+(?:accounts?|influencers?|creators?)\b"
-        if re.search(pat, text_lower):
-            filters["country"] = code
-            break
-        elif len(place) == 2 and re.search(r"\b(?:in|from)\s+" + re.escape(place.upper()) + r"\b", sanitized):
-            filters["country"] = code
-            break
+    # ---- category text
+    m = re.search(r"(?:category|categories)\s+([a-z&][a-z &]{1,30}?)(?=\s+(?:with|and|over|under|above|below|at)\b|$)"
+                  r"|(?:in|of)\s+(?:the\s+)?([a-z&][a-z &]{1,30}?)\s+categor(?:y|ies)", residual)
+    if m:
+        cat = (m.group(1) or m.group(2)).strip()
+        filters["category_contains"] = cat
+        understood.append(f"category contains '{cat}'")
+        residual = _blank(residual, m.span())
 
-    # ---------------------------------------------------------
-    # 7. SPECIFIC HANDLE / USERNAME (NLP-01: Robust handle extraction)
-    # ---------------------------------------------------------
-    explicit_at_match = re.search(r"@([a-zA-Z0-9_\.]{3,30})\b", text_lower)
+    # ---- "<topic> creators": an explicit topic word next to creators/accounts/influencers
+    if "category_contains" not in filters:
+        m = re.search(rf"\b({_TOPICS})\s+(?:creators?|accounts?|influencers?|pages?)\b", residual)
+        if m:
+            filters["category_contains"] = m.group(1)
+            understood.append(f"category contains '{m.group(1)}'")
+            residual = _blank(residual, m.span())
 
-    prefix_pattern = (
-        r"\b(?:"
-        r"(?:account|handle|profile)\s+of|"
-        r"(?:creator|user|influencer|profile|account)\s+named|"
-        r"handle\s*[:\s]|"
-        r"for\s+(?:account|handle|profile|creator|user|influencer)\s+(?:named\s+|of\s+)?"
-        r")\s*@?([a-zA-Z0-9_\.]{3,30})\b"
-    )
-    prefix_match = re.search(prefix_pattern, text_lower)
+    # ---- ranking
+    m = re.search(r"\btop\s+(\d{1,3})\b(?:\s+by\s+(followers|engagement(?: rate)?|avg\.? likes|average likes))?", residual)
+    if m:
+        lim = int(m.group(1))
+        by = (m.group(2) or "followers")
+        sort_by = {"followers": "total_followers", "average likes": "avg_likes", "avg likes": "avg_likes", "avg. likes": "avg_likes"}.get(by, "engagement_rate" if by.startswith("engagement") else "total_followers")
+        filters["_top_n"] = {"limit": max(1, lim), "sort_by": sort_by, "ascending": False}
+        understood.append(f"top {lim} by {sort_by}")
+        residual = _blank(residual, m.span())
 
-    candidate: Optional[str] = None
-    is_explicit = False
+    # ---- contradictions among numeric conditions
+    for key, label in (("total_followers", "followers"), ("engagement_rate", "engagement rate"), ("avg_likes", "average likes")):
+        conds = filters.get(key, [])
+        lo = max((c["value"] for c in conds if c["operator"] in (">", ">=")), default=None)
+        hi = min((c["value"] for c in conds if c["operator"] in ("<", "<=")), default=None)
+        if lo is not None and hi is not None and lo > hi:
+            warnings.append(f"Contradictory {label} constraints (lower bound {lo:g} > upper bound {hi:g}); no rows can match.")
 
-    if explicit_at_match:
-        candidate = explicit_at_match.group(1)
-        is_explicit = True
-    elif prefix_match:
-        candidate = prefix_match.group(1)
-        is_explicit = False
+    # ---- anything that still looks like a constraint is reported, not dropped silently
+    leftover = re.sub(r"\s+", " ", residual).strip()
+    frag = (r"(?:(?:more than|greater than|higher than|above|over|at least|minimum|less than|fewer than|lower than|below|"
+            r"under|at most|maximum|up to|>=|<=|>|<)\s*)?[^\s]*\d[^\s]*(?:\s*(?:million|thousand|billion|mil|bil|k|m|b|%|followers?))?")
+    for m in re.finditer(frag, leftover):
+        warnings.append(f"Could not interpret '{m.group(0).strip()}' - not applied. Use e.g. 'over 1m followers' or 'engagement above 2%'.")
+    for m in re.finditer(rf"\b(?:in|from|based in)\s+({_COUNTRIES})\b|\b({_COUNTRIES})\s+(?:creators?|accounts?|influencers?)\b", leftover):
+        place = m.group(1) or m.group(2)
+        warnings.append(f"'{place}' cannot be filtered: country is not a field in the creator data. Not applied.")
+    for word in _UNSUPPORTED:
+        if re.search(rf"\b{re.escape(word)}\b", leftover):
+            warnings.append(f"'{word}' cannot be filtered: it is not a field in the creator data. Not applied.")
 
-    if candidate:
-        candidate = candidate.rstrip(".!?,;:")
-        reserved = [
-            "accounts", "followers", "reach", "impressions", "reels", "carousels",
-            "sports", "music", "fashion", "fitness", "finance", "spain", "india",
-            "brazil", "america", "stories", "photos", "posts", "influencers",
-            "creators"
-        ]
-        common_nouns = {
-            "marketing", "summer", "new", "business", "tech", "technology", "product",
-            "campaign", "campaigns", "festival", "festivals", "brand", "brands",
-            "content", "post", "posts", "account", "accounts", "creator", "creators",
-            "user", "users", "influencer", "influencers", "profile", "profiles",
-            "video", "videos", "image", "images", "photo", "photos", "reel", "reels",
-            "story", "stories", "carousel", "carousels", "followers", "reach",
-            "impression", "impressions", "engagement", "virality", "analytics",
-            "prediction", "forecast", "data", "stats", "statistics", "report"
-        }
-
-        if is_explicit:
-            if candidate not in reserved and len(candidate) >= 3:
-                filters["username"] = candidate
-        else:
-            if (
-                candidate not in reserved
-                and candidate not in common_nouns
-                and candidate not in CATEGORY_SYNONYMS
-                and candidate not in COUNTRY_LOOKUP
-                and candidate not in MEDIA_TYPE_SYNONYMS
-                and len(candidate) >= 3
-            ):
-                filters["username"] = candidate
-
-    # ---------------------------------------------------------
-    # 8. TOP-N & RANKINGS (Word-boundary safe)
-    # ---------------------------------------------------------
-    top_match = re.search(r"\btop\s*(\d+)\b", text_lower)
-    most_followers = re.search(r"\b(?:most|highest|biggest)\s+(?:followers?|accounts?)\b", text_lower)
-    most_engaging = re.search(r"\b(?:most|highest)\s+(?:engaging|engagement)\b", text_lower)
-    most_viral = re.search(r"\b(?:most|highest)\s+(?:viral|virality)\b", text_lower)
-
-    if top_match:
-        lim = int(top_match.group(1))
-        sort_by = "total_followers"
-        if "engagement" in text_lower or re.search(r"\ber\b", text_lower):
-            sort_by = "engagement_rate"
-        elif "reach" in text_lower:
-            sort_by = "per_media_reach"
-        elif "virality" in text_lower or re.search(r"\bshares?\b", text_lower):
-            sort_by = "virality_score"
-
-        filters["_top_n"] = {"limit": lim, "sort_by": sort_by, "ascending": False}
-    elif most_followers:
-        filters["_top_n"] = {"limit": 10, "sort_by": "total_followers", "ascending": False}
-    elif most_engaging:
-        filters["_top_n"] = {"limit": 10, "sort_by": "engagement_rate", "ascending": False}
-    elif most_viral:
-        filters["_top_n"] = {"limit": 10, "sort_by": "virality_score", "ascending": False}
-
-    # ---------------------------------------------------------
-    # 9. PREDICTION INTENT
-    # ---------------------------------------------------------
-    predict_kw = ["predict", "prediction", "predicting", "estimate", "estimating", "forecast", "forecasting", "calculate"]
-    has_pred = any(k in text_lower for k in predict_kw)
-
-    predict_reach = ("reach" in text_lower and has_pred) or ("reach" in text_lower and "what is" in text_lower)
-    predict_impressions = ("impression" in text_lower and has_pred) or ("impressions" in text_lower and has_pred)
-
-    if has_pred and not predict_reach and not predict_impressions:
-        predict_reach = True
-        predict_impressions = True
-
-    # ---------------------------------------------------------
-    # 10. INTENT ANALYSIS & AUDITING
-    # ---------------------------------------------------------
-    intent, implicit_filters = analyze_query_intent(sanitized)
-
-    # Augment filters with implicit filters if not already explicitly specified
-    for k, v in implicit_filters.items():
-        if k not in filters:
-            filters[k] = v
-
-    audit_report = audit_query(
-        prompt=prompt,
-        filters=filters,
-        intent=intent,
-        predict_reach=bool(predict_reach),
-        predict_impressions=bool(predict_impressions)
-    )
-
-    return ParsedQuery(
-        filters=filters,
-        predict_reach=bool(predict_reach),
-        predict_impressions=bool(predict_impressions),
-        original_prompt=prompt,
-        sanitized_prompt=sanitized,
-        safety_flags=safety_flags,
-        intent=intent,
-        audit_report=audit_report
-    )
+    return ParsedQuery(filters=filters, understood=understood, warnings=warnings,
+                       original_prompt=prompt or "", safety_flags=safety_flags)

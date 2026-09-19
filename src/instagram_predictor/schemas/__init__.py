@@ -1,29 +1,27 @@
 from .profile import (
     PlatformType,
     MediaType,
-    ContentCategory,
-    ContentStyle,
-    Demographics,
-    PostMetrics,
     ProfileInput,
     PostInput,
+    FORMAT_TO_PLATFORM,
+    DAYS_OF_WEEK,
+    platform_of,
+    normalize_day,
 )
-from .query import NumericFilter, TopNSpec, ParsedQuery
-from .prediction import ConfidenceInterval, SimulationPrediction, MetricCard
+from .query import ParsedQuery
+from .prediction import ConfidenceInterval, Forecast, MetricCard
 
 __all__ = [
     "PlatformType",
     "MediaType",
-    "ContentCategory",
-    "ContentStyle",
-    "Demographics",
-    "PostMetrics",
     "ProfileInput",
     "PostInput",
-    "NumericFilter",
-    "TopNSpec",
+    "FORMAT_TO_PLATFORM",
+    "DAYS_OF_WEEK",
+    "platform_of",
+    "normalize_day",
     "ParsedQuery",
     "ConfidenceInterval",
-    "SimulationPrediction",
+    "Forecast",
     "MetricCard",
 ]

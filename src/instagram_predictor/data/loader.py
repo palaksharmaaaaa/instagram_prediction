@@ -1,102 +1,211 @@
-import ast
-import json
-import threading
-from typing import Any, List, Optional
+"""
+Strict loaders for real, observed data.
+
+Rules enforced here:
+  * Values are never imputed, defaulted, clipped, or rewritten. A row is either used exactly as
+    supplied or rejected with a stated reason.
+  * Rejections are returned in a ValidationReport so nothing disappears silently.
+  * There is no data generator anywhere in this project. If the data file is missing,
+    NoDataError is raised.
+"""
+
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import IO, Dict, List, Optional, Tuple, Union
+
 import numpy as np
 import pandas as pd
+
 from ..config import settings
-from .generator import ensure_dataset_exists
-from .feature_engineering import compute_derived_metrics
+from ..schemas import DAYS_OF_WEEK, MediaType, FORMAT_TO_PLATFORM
 
-_LOADER_LOCK = threading.Lock()
-_DATA_CACHE: Optional[pd.DataFrame] = None
+PathOrBuffer = Union[str, Path, IO]
+
+REQUIRED_POST_COLUMNS = [
+    "username",
+    "media_type",
+    "posted_day_of_week",
+    "posted_hour_of_day",
+    "total_followers",
+    "per_media_reach",
+]
+OPTIONAL_NUMERIC_COLUMNS = [
+    "caption_length_chars",
+    "hashtags_count",
+    "mentions_count",
+    "video_duration_seconds",
+    "carousel_slide_count",
+]
+OPTIONAL_BOOL_COLUMNS = ["has_call_to_action"]
+IMPRESSIONS_COLUMN = "per_media_impressions"
+POST_TEMPLATE_COLUMNS = (
+    ["post_id"] + REQUIRED_POST_COLUMNS + OPTIONAL_NUMERIC_COLUMNS + OPTIONAL_BOOL_COLUMNS + [IMPRESSIONS_COLUMN]
+)
+
+PROFILE_REQUIRED_COLUMNS = ["username", "platform", "total_followers"]
 
 
-def parse_list_field(val: Any) -> List[str]:
+class NoDataError(FileNotFoundError):
+    """Raised when a required data file does not exist. No data is ever generated."""
+
+
+@dataclass
+class ValidationReport:
+    rows_read: int = 0
+    rows_used: int = 0
+    rejected: List[Tuple[int, str]] = field(default_factory=list)   # (1-based data row number, reason)
+    notes: List[str] = field(default_factory=list)
+
+    @property
+    def rows_rejected(self) -> int:
+        return len(self.rejected)
+
+    def rejected_frame(self) -> pd.DataFrame:
+        return pd.DataFrame(self.rejected, columns=["row", "reason"])
+
+    def summary(self) -> str:
+        return f"{self.rows_used} of {self.rows_read} rows usable; {self.rows_rejected} rejected"
+
+
+def _read_csv(source: PathOrBuffer, what: str) -> pd.DataFrame:
+    if isinstance(source, (str, Path)):
+        p = Path(source)
+        if not p.exists():
+            raise NoDataError(f"{what} not found at {p}")
+    df = pd.read_csv(source, dtype=str, keep_default_na=False, na_values=[""])
+    df.columns = [str(c).strip().lower() for c in df.columns]
+    return df
+
+
+def load_profiles(source: Optional[PathOrBuffer] = None) -> Tuple[pd.DataFrame, ValidationReport]:
     """
-    Robustly deserializes a multi-label list field into a genuine Python list of strings.
-    Handles:
-    - Existing list/tuple/iterable of strings/objects
-    - String representations of lists: "['a', 'b']", '["a", "b"]'
-    - Nested stringified lists: "['[\"a\"]']" or "['[\\'a\\']']"
-    - Comma-separated strings: "a, b"
-    - Single string: "a"
-    - Missing / NaN / None: []
+    Loads observed creator-level facts. Numeric columns are parsed exactly; unparseable or
+    non-positive follower counts reject the row. Blank cells stay blank (NaN).
     """
-    if val is None or (isinstance(val, float) and np.isnan(val)) or val == "":
-        return []
+    df = _read_csv(source if source is not None else settings.PROFILES_PATH, "Creator profiles file")
+    report = ValidationReport(rows_read=len(df))
+    missing = [c for c in PROFILE_REQUIRED_COLUMNS if c not in df.columns]
+    if missing:
+        raise ValueError(f"Profiles file is missing required columns: {missing}")
 
-    if isinstance(val, (list, tuple, np.ndarray, set)):
-        items = list(val)
-    elif isinstance(val, str):
-        val_clean = val.strip()
-        if not val_clean:
-            return []
-        if (val_clean.startswith("[") and val_clean.endswith("]")) or (
-            val_clean.startswith("(") and val_clean.endswith(")")
-        ):
-            try:
-                parsed = ast.literal_eval(val_clean)
-                if isinstance(parsed, (list, tuple, set)):
-                    items = list(parsed)
-                else:
-                    items = [parsed]
-            except (ValueError, SyntaxError):
-                try:
-                    parsed = json.loads(val_clean)
-                    if isinstance(parsed, (list, tuple, set)):
-                        items = list(parsed)
-                    else:
-                        items = [parsed]
-                except Exception:
-                    inner = val_clean[1:-1].strip()
-                    if not inner:
-                        return []
-                    items = [s.strip().strip("'\"") for s in inner.split(",") if s.strip()]
-        elif "," in val_clean:
-            items = [s.strip().strip("'\"") for s in val_clean.split(",") if s.strip()]
-        else:
-            items = [val_clean]
+    numeric_cols = [c for c in df.columns if c not in
+                    ("username", "full_name", "platform", "account_category", "profile_url")]
+    for c in numeric_cols:
+        df[c] = pd.to_numeric(df[c], errors="coerce")
+
+    bad = pd.Series("", index=df.index, dtype=object)
+    bad[df["username"].isna()] = "username is blank"
+    bad[(bad == "") & (~(df["total_followers"] >= 1))] = "total_followers is missing or not a positive number"
+    dup = (bad == "") & df["username"].str.lower().duplicated(keep="first")
+    bad[dup] = "duplicate username (first occurrence kept)"
+
+    for idx in df.index[bad != ""]:
+        report.rejected.append((int(idx) + 1, bad[idx]))
+    out = df[bad == ""].copy()
+    out["username"] = out["username"].str.strip().str.lower()
+    report.rows_used = len(out)
+    return out.reset_index(drop=True), report
+
+
+def load_posts(
+    source: Optional[PathOrBuffer] = None,
+    profiles: Optional[pd.DataFrame] = None,
+) -> Tuple[pd.DataFrame, ValidationReport]:
+    """
+    Loads real per-post observations for model training.
+
+    `total_followers` is taken from the file when present. Otherwise it is joined from the creator
+    profile snapshot by username (and the report says so); rows with no follower count are rejected.
+    """
+    df = _read_csv(source if source is not None else settings.POSTS_PATH, "Post-level data file")
+    report = ValidationReport(rows_read=len(df))
+
+    if "total_followers" not in df.columns:
+        if profiles is None:
+            raise ValueError(
+                "Posts file has no 'total_followers' column and no creator profiles were supplied to join it from."
+            )
+        snap = profiles.set_index("username")["total_followers"]
+        df["total_followers"] = df["username"].str.strip().str.lower().map(snap).astype("float64").astype(str)
+        df.loc[df["total_followers"] == "nan", "total_followers"] = np.nan
+        report.notes.append("total_followers joined from the creator profile snapshot (not follower count at post time).")
+
+    missing = [c for c in REQUIRED_POST_COLUMNS if c not in df.columns]
+    if missing:
+        raise ValueError(f"Posts file is missing required columns: {missing}")
+
+    num = ["posted_hour_of_day", "total_followers", "per_media_reach"] + OPTIONAL_NUMERIC_COLUMNS
+    if IMPRESSIONS_COLUMN in df.columns:
+        num.append(IMPRESSIONS_COLUMN)
+    for c in num:
+        if c in df.columns:
+            df[c] = pd.to_numeric(df[c], errors="coerce")
+
+    valid_media = {m.value for m in MediaType}
+    days_norm = df["posted_day_of_week"].str.strip().str.title()
+
+    reasons = pd.Series("", index=df.index, dtype=object)
+
+    def flag(mask: pd.Series, reason: str) -> None:
+        m = mask & (reasons == "")
+        reasons[m] = reason
+
+    flag(df["username"].isna(), "username is blank")
+    flag(~df["media_type"].isin(valid_media), "media_type is not a supported format")
+    flag(~days_norm.isin(DAYS_OF_WEEK), "posted_day_of_week is not a weekday name")
+    hour = df["posted_hour_of_day"]
+    flag(~((hour >= 0) & (hour <= 23) & (hour == np.floor(hour))), "posted_hour_of_day is not an integer 0-23")
+    flag(~(df["total_followers"] >= 1), "total_followers is missing or not positive")
+    reach = df["per_media_reach"]
+    flag(~(reach >= 0), "per_media_reach is missing or negative")
+    for c in OPTIONAL_NUMERIC_COLUMNS:
+        if c in df.columns:
+            flag(df[c].notna() & (df[c] < 0), f"{c} is negative")
+    if "carousel_slide_count" in df.columns:
+        flag(df["carousel_slide_count"].notna() & (df["carousel_slide_count"] < 1), "carousel_slide_count < 1")
+    if IMPRESSIONS_COLUMN in df.columns:
+        flag(df[IMPRESSIONS_COLUMN].notna() & (df[IMPRESSIONS_COLUMN] < reach),
+             "per_media_impressions is smaller than per_media_reach (impossible; row not altered, rejected)")
+    if "post_id" in df.columns:
+        flag(df["post_id"].notna() & df["post_id"].duplicated(keep="first"), "duplicate post_id (first occurrence kept)")
+    if "platform" in df.columns:
+        expected = df["media_type"].map(lambda m: FORMAT_TO_PLATFORM[MediaType(m)].value if m in valid_media else None)
+        flag(df["platform"].notna() & expected.notna() & (df["platform"].str.strip() != expected),
+             "platform does not match the platform of media_type")
+    if "has_call_to_action" in df.columns:
+        lowered = df["has_call_to_action"].str.strip().str.lower()
+        allowed = {"true", "false", "1", "0", "yes", "no"}
+        flag(lowered.notna() & ~lowered.isin(allowed), "has_call_to_action is not a boolean")
+
+    for idx in df.index[reasons != ""]:
+        report.rejected.append((int(idx) + 1, reasons[idx]))
+
+    out = df[reasons == ""].copy()
+    out["username"] = out["username"].str.strip().str.lower()
+    out["posted_day_of_week"] = days_norm[out.index]
+    out["posted_hour_of_day"] = out["posted_hour_of_day"].astype(int)
+    out["platform"] = out["media_type"].map(lambda m: FORMAT_TO_PLATFORM[MediaType(m)].value)
+    if "has_call_to_action" in out.columns:
+        low = out["has_call_to_action"].str.strip().str.lower()
+        out["has_call_to_action"] = low.map({"true": 1.0, "1": 1.0, "yes": 1.0, "false": 0.0, "0": 0.0, "no": 0.0})
+    report.rows_used = len(out)
+    return out.reset_index(drop=True), report
+
+
+def append_posts_csv(new_rows: pd.DataFrame, path: Optional[Path] = None) -> int:
+    """
+    Appends observed rows to the posts CSV, skipping post_ids that already exist.
+    Returns the number of rows written. Existing rows are never modified.
+    """
+    path = Path(path) if path else settings.POSTS_PATH
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if path.exists():
+        existing = pd.read_csv(path, dtype=str, keep_default_na=False, na_values=[""])
+        if "post_id" in existing.columns and "post_id" in new_rows.columns:
+            new_rows = new_rows[~new_rows["post_id"].astype(str).isin(set(existing["post_id"].dropna()))]
+        combined_cols = list(existing.columns) + [c for c in new_rows.columns if c not in existing.columns]
+        out = pd.concat([existing, new_rows.astype(str).replace("nan", "")], ignore_index=True)[combined_cols]
     else:
-        items = [str(val)]
-
-    result: List[str] = []
-    for item in items:
-        if item is None or (isinstance(item, float) and np.isnan(item)):
-            continue
-        item_str = str(item).strip()
-        if item_str.startswith("[") and item_str.endswith("]"):
-            nested = parse_list_field(item_str)
-            result.extend(nested)
-        else:
-            cleaned = item_str.strip("'\"")
-            if cleaned:
-                result.append(cleaned)
-    return result
-
-
-def load_dataset(reload: bool = False) -> pd.DataFrame:
-    """
-    Loads and caches the multi-dimensional Instagram dataset with computed derived metrics.
-    Ensures multi-label list fields are cleanly deserialized into genuine Python lists.
-    Thread-safe implementation protected by _LOADER_LOCK.
-    """
-    global _DATA_CACHE
-    with _LOADER_LOCK:
-        if _DATA_CACHE is None or reload:
-            df = ensure_dataset_exists()
-            for col in ["account_categories", "categorizations"]:
-                if col in df.columns:
-                    df[col] = df[col].apply(parse_list_field)
-            df = compute_derived_metrics(df)
-            _DATA_CACHE = df
-        return _DATA_CACHE.copy()
-
-
-def clear_loader_cache() -> None:
-    """
-    Clears the in-memory dataset cache in a thread-safe manner.
-    """
-    global _DATA_CACHE
-    with _LOADER_LOCK:
-        _DATA_CACHE = None
+        out = new_rows
+    out.to_csv(path, index=False)
+    return len(new_rows)

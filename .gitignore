@@ -63,3 +63,8 @@ venv.bak/
 # OS files
 .DS_Store
 Thumbs.db
+
+# Real post-level data and models derived from it stay local
+data/posts.csv
+models/*.joblib
+models/*.json

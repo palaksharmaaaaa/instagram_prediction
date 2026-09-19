@@ -1,130 +1,64 @@
-from typing import Tuple, Dict, Any, Optional
-import numpy as np
+"""
+Creator search over OBSERVED data. Nothing here predicts or estimates: every returned value is a
+value from the data file, and every filter that could not be applied is reported by the parser.
+"""
+
+import operator
+from typing import Any, Dict, Optional, Tuple
+
 import pandas as pd
 
-from ..data import load_dataset
 from ..nlp import parse_query
-from ..models import predict_batch
 from ..schemas import ParsedQuery
 
+_OPS = {">": operator.gt, ">=": operator.ge, "<": operator.lt, "<=": operator.le}
 
-def apply_query_filters(df: pd.DataFrame, filters: Dict[str, Any]) -> pd.DataFrame:
-    """
-    Applies extracted query filters to the DataFrame.
-    """
-    if df.empty or not filters:
-        return df.copy()
 
+def apply_filters(df: pd.DataFrame, filters: Dict[str, Any]) -> Tuple[pd.DataFrame, list]:
+    """Applies parsed filters conjunctively. Returns (rows, notes). Missing values never match a numeric filter."""
+    notes = []
     result = df.copy()
-
     for col, cond in filters.items():
         if col.startswith("_"):
             continue
-
-        # Category
-        if col == "category":
-            cat_query = str(cond).lower()
-            acc_cats = result["account_categories_str"].astype(str).str.lower() if "account_categories_str" in result.columns else pd.Series("", index=result.index)
-            mask = (
-                result["category"].astype(str).str.lower().str.contains(cat_query, regex=False, na=False)
-                | result["account_category"].astype(str).str.lower().str.contains(cat_query, regex=False, na=False)
-                | acc_cats.str.contains(cat_query, regex=False, na=False)
-            )
-            result = result[mask]
-            continue
-
-        # Categorization / Content Style
-        if col == "categorization":
-            style_query = str(cond).lower()
-            mask = result["categorization"].astype(str).str.lower().str.contains(style_query, regex=False, na=False)
-            result = result[mask]
-            continue
-
-        # Platform
-        if col == "platform":
-            p_query = str(cond).lower()
-            result = result[result["platform"].astype(str).str.lower() == p_query]
-            continue
-
-        # Media Type
-        if col == "media_type":
-            m_query = str(cond).lower()
-            result = result[result["media_type"].astype(str).str.lower() == m_query]
-            continue
-
-        # Country
-        if col == "country":
-            c_query = str(cond).upper()
-            mask = (
-                (result["country"].astype(str).str.upper() == c_query)
-                | (result["top_country"].astype(str).str.upper() == c_query)
-            )
-            result = result[mask]
-            continue
-
-        # Username / Handle
         if col == "username":
-            u_query = str(cond).lower().lstrip("@")
-            mask = (
-                result["username"].astype(str).str.lower().str.contains(u_query, regex=False, na=False)
-                | result["full_name"].astype(str).str.lower().str.contains(u_query, regex=False, na=False)
-            )
-            result = result[mask]
-            continue
-
-        # Numeric bounds
-        if col in result.columns and isinstance(cond, dict):
+            result = result[result["username"].astype(str).str.contains(str(cond), case=False, regex=False, na=False)]
+        elif col == "category_contains":
+            if "account_category" not in result.columns:
+                notes.append("The data has no category column; category filter not applied.")
+                continue
+            result = result[result["account_category"].astype(str).str.contains(str(cond), case=False, regex=False, na=False)]
+        elif isinstance(cond, list):
+            if col not in result.columns:
+                notes.append(f"The data has no '{col}' column; that filter was not applied.")
+                continue
             series = pd.to_numeric(result[col], errors="coerce")
-            op = cond.get("operator")
-
-            if op == "between":
-                min_v = cond.get("min", -np.inf)
-                max_v = cond.get("max", np.inf)
-                result = result[(series >= min_v) & (series <= max_v)]
-            elif op == ">":
-                result = result[series > cond["value"]]
-            elif op == ">=":
-                result = result[series >= cond["value"]]
-            elif op == "<":
-                result = result[series < cond["value"]]
-            elif op == "<=":
-                result = result[series <= cond["value"]]
-            elif op == "==":
-                result = result[series == cond["value"]]
-
-    # Top-N sorting
-    if "_top_n" in filters:
-        spec = filters["_top_n"]
-        sort_by = spec.get("sort_by", "total_followers")
-        ascending = spec.get("ascending", False)
-        limit = spec.get("limit", 10)
-
-        if sort_by in result.columns:
-            result = result.sort_values(by=sort_by, ascending=ascending)
-        result = result.head(limit)
-
-    return result.reset_index(drop=True)
+            mask = pd.Series(True, index=result.index)
+            for c in cond:
+                mask &= _OPS[c["operator"]](series, c["value"]).fillna(False)
+            result = result[mask]
+    top = filters.get("_top_n")
+    if top:
+        col = top["sort_by"]
+        if col in result.columns:
+            result = result.sort_values(col, ascending=top["ascending"], na_position="last").head(top["limit"])
+        else:
+            notes.append(f"Cannot rank by '{col}': column missing.")
+    return result.reset_index(drop=True), notes
 
 
-def run_analytics_pipeline(
-    prompt: str,
-    df: Optional[pd.DataFrame] = None
-) -> Tuple[ParsedQuery, pd.DataFrame]:
-    """
-    End-to-end service coordinating query parsing, filtering, and predictive modeling.
-    """
-    parsed_query = parse_query(prompt)
-    if df is None:
-        df = load_dataset()
+def run_creator_query(prompt: str, profiles: pd.DataFrame) -> Tuple[ParsedQuery, pd.DataFrame, list]:
+    parsed = parse_query(prompt)
+    rows, notes = apply_filters(profiles, parsed.filters)
+    return parsed, rows, notes
 
-    filtered_df = apply_query_filters(df, parsed_query.filters)
 
-    if parsed_query.predict_reach or parsed_query.predict_impressions:
-        if not filtered_df.empty:
-            filtered_df = predict_batch(
-                filtered_df,
-                predict_reach=parsed_query.predict_reach,
-                predict_impressions=parsed_query.predict_impressions
-            )
-
-    return parsed_query, filtered_df
+def observed_post_summary(posts: Optional[pd.DataFrame]) -> Optional[pd.DataFrame]:
+    """Per-creator descriptive statistics of the supplied posts (medians of observed values only)."""
+    if posts is None or posts.empty:
+        return None
+    g = posts.groupby("username")
+    out = g.agg(posts=("per_media_reach", "size"), median_reach=("per_media_reach", "median"),
+                median_followers=("total_followers", "median")).reset_index()
+    out["median_reach_per_follower"] = out["median_reach"] / out["median_followers"]
+    return out
