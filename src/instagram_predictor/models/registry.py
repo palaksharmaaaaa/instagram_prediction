@@ -48,15 +48,25 @@ def compute_artifact_hash(path: Path) -> str:
     return sha256.hexdigest()
 
 
-def verify_artifact_integrity(artifact_path: Path, artifact_key: Optional[str] = None) -> bool:
+def verify_artifact_integrity(
+    artifact_path: Path,
+    artifact_key: Optional[str] = None,
+    strict: bool = False,
+) -> bool:
     """
     Checks the SHA-256 digest of the artifact against an expected hash before calling joblib.load().
     If model_metadata.json exists and contains an artifact_hashes dictionary, verify the SHA-256 hash against it.
     If hashes don't match, raise a SecurityError("Artifact integrity verification failed").
-    If artifact_hashes is not yet populated in metadata (e.g. during fresh training bootstrap),
-    log a warning or compute it gracefully.
+    If strict=True:
+      - Raises SecurityError if model_metadata.json does not exist.
+      - Raises SecurityError if artifact_hashes is missing or not a dict.
+      - Raises SecurityError if artifact_path has no expected hash recorded.
+    If strict=False:
+      - Logs a warning when hashes are missing or during bootstrap.
     """
     if not artifact_path.exists():
+        if strict:
+            raise SecurityError(f"Artifact does not exist: {artifact_path}")
         return False
 
     actual_hash = compute_artifact_hash(artifact_path)
@@ -83,18 +93,30 @@ def verify_artifact_integrity(artifact_path: Path, artifact_key: Optional[str] =
                     logger.debug(f"Artifact integrity verified for {artifact_path.name}")
                     return True
                 else:
+                    if strict:
+                        raise SecurityError(
+                            f"Artifact integrity verification failed: '{artifact_path.name}' not registered in artifact_hashes"
+                        )
                     logger.warning(
                         f"Artifact '{artifact_path.name}' not found in artifact_hashes; skipping verification."
                     )
             else:
+                if strict:
+                    raise SecurityError(
+                        "Artifact integrity verification failed: 'artifact_hashes' is not populated in metadata"
+                    )
                 logger.warning(
                     "model_metadata.json exists but 'artifact_hashes' is not populated; skipping verification."
                 )
         except SecurityError:
             raise
         except Exception as e:
+            if strict:
+                raise SecurityError(f"Artifact integrity verification failed: could not parse metadata: {e}") from e
             logger.warning(f"Could not verify artifact hash against metadata: {e}")
     else:
+        if strict:
+            raise SecurityError("Artifact integrity verification failed: model_metadata.json does not exist")
         logger.warning("model_metadata.json does not exist; skipping artifact verification.")
 
     return True
@@ -112,7 +134,7 @@ def get_pre_publish_reach_pipeline():
                     from .trainer import train_and_persist_pipelines
                     logger.info("Pre-publishing reach pipeline not found. Triggering automated model training...")
                     train_and_persist_pipelines()
-                verify_artifact_integrity(settings.PRE_PUBLISH_REACH_MODEL_PATH, "pre_publish_reach_pipeline")
+                verify_artifact_integrity(settings.PRE_PUBLISH_REACH_MODEL_PATH, "pre_publish_reach_pipeline", strict=True)
                 _REGISTRY_CACHE["pre_publish_reach_pipeline"] = joblib.load(settings.PRE_PUBLISH_REACH_MODEL_PATH)
     return _REGISTRY_CACHE["pre_publish_reach_pipeline"]
 
@@ -129,7 +151,7 @@ def get_pre_publish_impressions_pipeline():
                     from .trainer import train_and_persist_pipelines
                     logger.info("Pre-publishing impressions pipeline not found. Triggering automated model training...")
                     train_and_persist_pipelines()
-                verify_artifact_integrity(settings.PRE_PUBLISH_IMPRESSIONS_MODEL_PATH, "pre_publish_impressions_pipeline")
+                verify_artifact_integrity(settings.PRE_PUBLISH_IMPRESSIONS_MODEL_PATH, "pre_publish_impressions_pipeline", strict=True)
                 _REGISTRY_CACHE["pre_publish_impressions_pipeline"] = joblib.load(settings.PRE_PUBLISH_IMPRESSIONS_MODEL_PATH)
     return _REGISTRY_CACHE["pre_publish_impressions_pipeline"]
 
@@ -146,7 +168,7 @@ def get_reach_pipeline():
                     from .trainer import train_and_persist_pipelines
                     logger.info("Reach pipeline not found. Triggering automated model training...")
                     train_and_persist_pipelines()
-                verify_artifact_integrity(settings.REACH_MODEL_PATH, "reach_pipeline")
+                verify_artifact_integrity(settings.REACH_MODEL_PATH, "reach_pipeline", strict=True)
                 _REGISTRY_CACHE["reach_pipeline"] = joblib.load(settings.REACH_MODEL_PATH)
     return _REGISTRY_CACHE["reach_pipeline"]
 
@@ -163,7 +185,7 @@ def get_impressions_pipeline():
                     from .trainer import train_and_persist_pipelines
                     logger.info("Impressions pipeline not found. Triggering automated model training...")
                     train_and_persist_pipelines()
-                verify_artifact_integrity(settings.IMPRESSIONS_MODEL_PATH, "impressions_pipeline")
+                verify_artifact_integrity(settings.IMPRESSIONS_MODEL_PATH, "impressions_pipeline", strict=True)
                 _REGISTRY_CACHE["impressions_pipeline"] = joblib.load(settings.IMPRESSIONS_MODEL_PATH)
     return _REGISTRY_CACHE["impressions_pipeline"]
 

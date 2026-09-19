@@ -80,7 +80,7 @@ def explain_post_prediction(
 ) -> Dict[str, Any]:
     """
     Evaluates the pre-publishing model on the current post vs baseline/reference variations
-    using exact interventional TreeSHAP attribution to compute the exact impact of each creative choice:
+    using exact Combinatorial Shapley Attribution (evaluating 64 coalitions over 6 creative levers) to compute the exact impact of each creative choice:
       - Format Impact (e.g. Reel or Carousel vs Static Image)
       - Content Styles Impact (e.g. Educational / Entertaining vs neutral)
       - Call-to-Action Impact (CTA enabled vs disabled)
@@ -554,6 +554,30 @@ def simulate_post_performance(
         level=coverage_label
     )
 
+    # Also compute 90% Mondrian conformal interval from calibrated q90 quantiles
+    q_reach_90 = tier_reach_meta.get("q90", reach_eval.get("conformal_quantile_90", 0.45))
+    q_imp_90 = tier_imp_meta.get("q90", imp_eval.get("conformal_quantile_90", 0.45))
+
+    reach_lower_90 = max(int(np.expm1(np.clip(log_reach - q_reach_90, 0.0, 30.0))), 50)
+    reach_upper_90 = max(int(np.expm1(np.clip(log_reach + q_reach_90, 0.0, 30.0))), reach_lower_90)
+    imp_lower_90 = max(int(np.expm1(np.clip(log_imp - q_imp_90, 0.0, 30.0))), reach_lower_90)
+    imp_upper_90 = max(int(np.expm1(np.clip(log_imp + q_imp_90, 0.0, 30.0))), max(reach_upper_90, imp_lower_90))
+
+    reach_ci_90 = ConfidenceInterval(
+        lower=reach_lower_90,
+        point_estimate=point_reach,
+        upper=reach_upper_90,
+        confidence_level=0.90,
+        level="90% Mondrian Conformal Coverage"
+    )
+    imp_ci_90 = ConfidenceInterval(
+        lower=imp_lower_90,
+        point_estimate=point_imp,
+        upper=imp_upper_90,
+        confidence_level=0.90,
+        level="90% Mondrian Conformal Coverage"
+    )
+
     # Virality tier
     if virality >= 0.20 or (point_reach > profile.total_followers * 2.0):
         v_tier = "🚀 Explosive / Viral"
@@ -578,6 +602,10 @@ def simulate_post_performance(
     return SimulationPrediction(
         projected_reach=reach_ci,
         projected_impressions=imp_ci,
+        projected_reach_90=reach_ci_90,
+        projected_impressions_90=imp_ci_90,
+        reach_90_ci=reach_ci_90,
+        impressions_90_ci=imp_ci_90,
         projected_engagement_rate=round(proj_er * 100, 2),
         projected_save_rate=round(proj_save * 100, 2),
         projected_share_rate=round(proj_share * 100, 2),

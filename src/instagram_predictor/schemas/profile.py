@@ -62,12 +62,15 @@ class ContentStyle(str, Enum):
 
 
 class Demographics(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
     top_country: str = Field(default="US", description="Top audience country ISO code")
     secondary_country: str = Field(default="IN", description="Secondary audience country ISO code")
     primary_age_group: str = Field(default="25-34", description="Dominant audience age group")
     gender_female_pct: float = Field(default=0.50, ge=0.0, le=1.0, description="Female audience percentage (0.0 to 1.0)")
     gender_male_pct: float = Field(default=0.50, ge=0.0, le=1.0, description="Male audience percentage (0.0 to 1.0)")
     audience_activity_score: float = Field(default=0.75, ge=0.0, le=1.0, description="Audience daily active index (0.0 to 1.0)")
+    is_estimated: bool = Field(default=False, description="Whether demographics data is an estimated baseline prior")
 
     @field_validator("top_country", "secondary_country")
     def clean_country(cls, v: str) -> str:
@@ -93,6 +96,8 @@ class Demographics(BaseModel):
 
 
 class PostMetrics(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
     likes: int = Field(default=0, ge=0)
     comments: int = Field(default=0, ge=0)
     shares: int = Field(default=0, ge=0)
@@ -104,6 +109,8 @@ class PostMetrics(BaseModel):
     reach_from_hashtags_pct: Optional[float] = Field(default=None, ge=0.0, le=1.0)
     reach: Optional[int] = Field(default=None, ge=0)
     impressions: Optional[int] = Field(default=None, ge=0)
+    views: Optional[int] = Field(default=None, ge=0, description="Modern Meta v22.0 video/media views")
+    total_interactions: Optional[int] = Field(default=None, ge=0, description="Meta v22.0 aggregate total interactions")
 
 
 class ProfileInput(BaseModel):
@@ -126,6 +133,11 @@ class ProfileInput(BaseModel):
     profile_picture_url: Optional[str] = Field(default=None, description="Direct URL to creator profile picture")
     biography: Optional[str] = Field(default=None, description="Creator profile bio text")
     raw_following: Optional[int] = Field(default=None, description="Uncapped following count reported by platform")
+    country_inferred: bool = Field(default=False, description="Whether country was inferred/defaulted rather than from live insights")
+    estimated_metrics: bool = Field(default=False, description="Whether account_age_years, posting_frequency, and follower_growth are estimated baseline priors")
+    raw_category: Optional[str] = Field(default=None, description="Raw category string from Meta Graph API")
+    meta_category_raw: Optional[str] = Field(default=None, description="Raw Meta API category string")
+    prior_metrics_estimated: bool = Field(default=False, description="Whether historical reach/impressions metrics are estimated baseline priors")
 
 
     @field_validator("username")
@@ -147,7 +159,7 @@ class ProfileInput(BaseModel):
 
 
 class PostInput(BaseModel):
-    model_config = ConfigDict(extra="allow")
+    model_config = ConfigDict(extra="forbid")
 
     platform: PlatformType = Field(default=PlatformType.INSTAGRAM, description="Social media publishing platform")
     media_type: MediaType = Field(default=MediaType.REEL)

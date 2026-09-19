@@ -89,3 +89,11 @@ def test_post_caption_length_platform_limit():
         PostInput(caption_length_chars=2201)
     assert "less than or equal to 2200" in str(exc_info.value)
 
+
+def test_post_input_forbids_extra_fields():
+    """Verify PostInput model_config extra='forbid' rejects arbitrary undocumented fields."""
+    with pytest.raises(ValidationError) as exc_info:
+        PostInput(caption_length_chars=100, malicious_or_invalid_field="should_be_forbidden")
+    assert "Extra inputs are not permitted" in str(exc_info.value)
+
+

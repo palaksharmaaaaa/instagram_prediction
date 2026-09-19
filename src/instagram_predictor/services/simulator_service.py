@@ -31,7 +31,7 @@ def explain_post_simulation(
     post_data: Dict[str, Any]
 ) -> Tuple[bool, List[str], Optional[Dict[str, Any]]]:
     """
-    Computes TreeSHAP / creative feature importance explainability for a simulation scenario.
+    Computes Exact Combinatorial Shapley Attribution (64 coalitions across 6 creative levers) for a simulation scenario.
     """
     valid_prof, prof_errors, clean_prof = validate_profile_dict(profile_data)
     valid_post, post_errors, clean_post = validate_post_dict(post_data)

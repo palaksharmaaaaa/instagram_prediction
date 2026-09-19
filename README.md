@@ -5,9 +5,13 @@
 [![Framework: Scikit-Learn](https://img.shields.io/badge/ML-Scikit--Learn%20%7C%20LightGBM-orange.svg)](https://scikit-learn.org/)
 [![Validation: Pydantic v2](https://img.shields.io/badge/validation-Pydantic%20v2-green.svg)](https://docs.pydantic.dev/)
 [![UI: Streamlit](https://img.shields.io/badge/UI-Streamlit-red.svg)](https://streamlit.io/)
-[![Tests: 136 Passing](https://img.shields.io/badge/tests-136%2F136%20passing-brightgreen.svg)](https://pytest.org/)
+[![Tests: 169 Passing](https://img.shields.io/badge/tests-169%2F169%20passing-brightgreen.svg)](https://pytest.org/)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-> **Enterprise-grade machine learning forecasting, Mondrian conformal uncertainty quantification, high-dimensional feature engineering, defensive guardrails, and what-if post simulation engine for Instagram, YouTube, and Snapchat creators, influencer marketing agencies, and social media brands.**
+> [!IMPORTANT]
+> **Trained on Synthetic Benchmark Data**: The predictive models in this repository are calibrated and evaluated on a synthetic creator benchmark dataset (750 posts across 250 creators) generated from domain-heuristic formulations. While cross-validation ($R^2 \approx 0.84$) and Mondrian conformal intervals rigorously demonstrate algorithmic consistency and finite-sample calibration on this benchmark distribution, projections are intended for heuristic exploration and creative lever comparison, not as guaranteed forecasts on live social media platforms. Live Meta Graph API account connections import verified creator statistics, while pre-publish simulations forecast projected relative performance across creative levers.
+
+> Multi-platform machine learning forecasting, Mondrian conformal uncertainty quantification, high-dimensional feature engineering, defensive guardrails, and what-if post simulation engine for Instagram, YouTube, and Snapchat creators, influencer marketing agencies, and social media brands.
 
 ---
 
@@ -25,23 +29,23 @@
 11. [NLP Natural Language Query Engine](#-nlp-natural-language-query-engine)
 12. [Streamlit Enterprise Dashboard (`app.py`)](#-streamlit-enterprise-dashboard-apppy)
 13. [CLI Scripts & Execution Guide](#-cli-scripts--execution-guide)
-14. [Comprehensive Test Suite (136 Tests)](#-comprehensive-test-suite-136-tests)
+14. [Comprehensive Test Suite (169 Tests)](#-comprehensive-test-suite-169-tests)
 15. [Installation & Build Configuration](#-installation--build-configuration)
 
 ---
 
 ## 🌟 Executive Summary & Core Principles
 
-The **Instagram AI Prediction & Analytics Engine** is designed to solve one of the most difficult challenges in social media analytics: **forecasting organic reach and impressions before publishing a post**, while quantifying predictive uncertainty with finite-sample mathematical guarantees.
+The **Instagram AI Prediction & Analytics Engine** addresses the challenge of pre-publish social media simulation: **estimating relative organic reach and impressions before publishing a post**, while quantifying predictive uncertainty through Mondrian conformal prediction intervals.
 
 ### Architectural Pillars
 
 1. **Defensive Separation of Concerns**: Strict boundary isolation across domain schemas, defensive guardrails, feature engineering transformations, gradient-boosted decision trees, natural language query parsers, and presentation dashboards.
 2. **Zero-Leakage Creator Validation**: Strict GroupKFold cross-validation grouped by creator `username` ensures models generalize across distinct creators rather than memorizing individual account biases.
-3. **Mondrian Conformal Calibration**: Quantifies heteroscedastic prediction uncertainty across distinct creator tiers (Nano, Micro, Macro, Mega) with provable finite-sample coverage guarantees ($1 - \alpha$).
+3. **Mondrian Conformal Calibration**: Quantifies heteroscedastic prediction uncertainty across distinct creator tiers (Nano, Micro, Macro, Mega) with calibrated finite-sample coverage levels (80% and 90%).
 4. **Cryptographic Artifact Integrity**: Model weights and transformers are verified via SHA-256 HMAC digests prior to deserialization, closing arbitrary code execution (RCE) vectors.
-5. **Multi-Threaded Concurrency & Safety**: Double-checked locking with `threading.Lock()` and atomic file replacement guarantee thread safety in multi-user Streamlit deployments.
-6. **Epistemic Out-Of-Distribution (OOD) Safety**: Evaluates feature-space distances from the training distribution, alerting users when simulations represent extrapolation beyond observed data.
+5. **Multi-Threaded Concurrency & Safety**: Double-checked locking with `threading.Lock()` and atomic file replacement guarantee thread safety in multi-user deployments.
+6. **Epistemic Out-Of-Distribution (OOD) Safety**: Evaluates feature-space distances from the training distribution, alerting users when simulations represent extrapolation beyond observed benchmark data.
 7. **Deterministic Invariant Enforcement**: Mathematical domain invariants are strictly guaranteed ($\text{Reach} \le \text{Impressions}$, $\text{Likes} \le \text{Impressions}$, $\text{Shares} \le \text{Impressions}$, $\text{Following} \le 7,500$).
 
 ---
@@ -141,21 +145,26 @@ project-instagram-prediction/
 │   │   └── utils/
 │   │       ├── __init__.py
 │   │       └── formatting.py                     # Humanized number, percentage, and currency formatters
-├── app.py                                        # Enterprise Streamlit Web Dashboard (Multi-Platform)
-└── tests/                                        # Comprehensive pytest suite (136 tests)
+├── app.py                                        # Streamlit Web Dashboard (Creator & Pro Modes)
+├── LICENSE                                       # MIT License
+└── tests/                                        # Comprehensive pytest suite (169 tests)
     ├── test_audit_hardening.py                   # 17 consolidated audit edge-case and invariant tests
     ├── test_concurrency.py                       # Multi-threaded stress tests & deadlock verification
     ├── test_conformal_mondrian.py                # Exact finite-sample conformal quantiles & Nano tier tests
-    ├── test_end_to_end.py                        # End-to-end analytics & prediction pipeline tests (10 tests)
+    ├── test_consolidated_dataset.py              # Consolidated 51-column dataset integrity tests
+    ├── test_end_to_end.py                        # End-to-end analytics & prediction pipeline tests
     ├── test_end_to_end_service.py                # Analytics & simulator service tests
     ├── test_feature_engineering.py               # Feature generation, list parsing, and Nano tier tests
+    ├── test_graph_api_ui_path.py                 # Meta Graph API client methods & UI ingestion flow
     ├── test_guardrails.py                        # Sanity invariants, bot detection, zero-comment anomalies
-    ├── test_integrations.py                      # Graph API integration & error handling tests (22 tests)
+    ├── test_integrations.py                      # Graph API integration & error handling tests
+    ├── test_interpreter_service.py               # AI Strategist briefing & conversational interpretation
+    ├── test_live_ui_e2e.py                       # Live Streamlit AppTest UI end-to-end test suite
     ├── test_models.py                            # Pipeline loading, creative sensitivity, overflow guards
-    ├── test_multi_platform.py                    # Phase 5 cross-platform schemas, inference & TreeSHAP (21 tests)
+    ├── test_multi_platform.py                    # Cross-platform schemas, inference & Shapley attribution
     ├── test_query_parser.py                      # NLP parser unit tests & decimal multipliers
-    ├── test_schemas.py                           # Pydantic v2 schema boundary & gender sum tests
-    └── test_security.py                          # SHA-256 tampering, regex DoS, HTML evasion, CSV DDE
+    ├── test_schemas.py                           # Pydantic v2 schema boundary & extra='forbid' tests
+    └── test_security.py                          # SHA-256 tampering, strict mode, regex DoS, CSV DDE
 ```
 
 ---
@@ -433,7 +442,7 @@ uv run streamlit run app.py
   - **Dynamic Media Format Dropdown**: Automatically restricts formats to valid platform types (e.g. YouTube Shorts, Community Posts, Snapchat Spotlight).
   - **Platform-Specific Controls**: YouTube video title length ($0-100$), thumbnail facial presence toggle, Snapchat screenshot capture rate slider, and dynamic duration controls up to 60 minutes for YouTube videos.
   - **Adaptive Metric Labels**: Automatically renders "Projected Reach" for Instagram, "Projected Views & Reach" for YouTube, and "Snap Views & Reach" for Snapchat.
-  - **Interventional TreeSHAP Explainability**: Evaluates feature contributions against platform-appropriate baselines (Static Image for Instagram, Community Post for YouTube, Snapchat Post for Snapchat).
+  - **Interventional Exact Combinatorial Shapley Attribution**: Evaluates feature contributions (64 coalitions across 6 creative levers) against platform-appropriate baselines (Static Image for Instagram, Community Post for YouTube, Snapchat Post for Snapchat).
   - Generates exact Mondrian conformal confidence intervals ($80\%$ and $90\%$).
 
 ---
@@ -465,9 +474,9 @@ uv run streamlit run app.py
 
 ---
 
-## 🧪 Comprehensive Test Suite (136 Tests)
+## 🧪 Comprehensive Test Suite (169 Tests)
 
-The test suite consists of **136 automated tests** across 13 test modules:
+The test suite consists of **169 automated tests** across 17 test modules:
 
 ```powershell
 uv run --with pytest python -m pytest tests/ -v
@@ -485,35 +494,43 @@ uv run --with pytest python -m pytest tests/ -v
    - NLP preposition immunity and decimal multipliers.
    - Simulation creative controls sensitivity.
 2. **`test_concurrency.py` (7 tests)**:
-   - Multi-threaded stress tests hitting registry and loader caches simultaneously.
+   - Multi-threaded stress tests hitting registry and loader caches simultaneously without deadlock.
 3. **`test_conformal_mondrian.py` (10 tests)**:
    - Exact finite-sample quantile formula verification, Nano tier calibration, HPO log-loss objective.
-4. **`test_end_to_end.py` (10 tests)**:
+4. **`test_consolidated_dataset.py` (9 tests)**:
+   - Complete 51-column schema validation, creator tier segregation, and duplicate row/column hygiene.
+5. **`test_end_to_end.py` (10 tests)**:
    - Modern end-to-end scenarios, follower unit scaling, comparison operators, and production model inference.
-5. **`test_end_to_end_service.py` (2 tests)**:
+6. **`test_end_to_end_service.py` (2 tests)**:
    - Analytics service and post simulation service workflows.
-6. **`test_feature_engineering.py` (6 tests)**:
+7. **`test_feature_engineering.py` (6 tests)**:
    - Feature generation, Nano tier coverage, and robust multi-label list parsing.
-7. **`test_guardrails.py` (11 tests)**:
+8. **`test_graph_api_ui_path.py` (3 tests)**:
+   - Meta Graph API v22.0 integration, `fetch_full_creator_state`, and Streamlit Pro Mode account ingestion.
+9. **`test_guardrails.py` (11 tests)**:
    - Platform sanity checks, invariant enforcement on shares/comments, zero-comment anomaly detection.
-8. **`test_integrations.py` (22 tests)**:
-   - Graph API integration, token masking, profile fetching, recent media insights fallback, and error handling.
-9. **`test_models.py` (11 tests)**:
-   - Pipeline deserialization, creative parameter sensitivity, extreme numerical bounds, pre-publishing feature isolation, and TreeSHAP explainability.
-10. **`test_multi_platform.py` (21 tests)**:
+10. **`test_integrations.py` (18 tests)**:
+    - Graph API integration, token masking, profile fetching, recent media insights fallback, and error handling.
+11. **`test_interpreter_service.py` (10 tests)**:
+    - AI Content Strategist plain-English briefing, dialogue generation, and calibrated conformal confidence window.
+12. **`test_live_ui_e2e.py` (12 tests)**:
+    - Streamlit AppTest end-to-end simulation, Creator Mode suggestions, Pro Mode diagnostic tabs, and live HTTP server health.
+13. **`test_models.py` (12 tests)**:
+    - Pipeline deserialization, creative parameter sensitivity, extreme numerical bounds, pre-publishing feature isolation, and Shapley attribution.
+14. **`test_multi_platform.py` (17 tests)**:
     - Cross-platform schema validation for Instagram, YouTube, and Snapchat.
     - Default backward compatibility and platform auto-inference from media format.
     - Platform-specific field boundary enforcement (`video_title_length`, `thumbnail_has_face`, `screenshot_count`).
     - Cross-platform feature engineering (`is_short_form`, `is_video_content`, watch efficiency).
-    - Post simulation execution across all 8 multi-platform media formats.
-    - TreeSHAP explainability with platform-appropriate baselines.
+    - Post simulation execution across all multi-platform media formats.
+    - Exact Combinatorial Shapley attribution with platform-appropriate baselines.
     - Batch prediction automatic pipeline routing with platform metadata.
-11. **`test_query_parser.py` (6 tests)**:
+15. **`test_query_parser.py` (6 tests)**:
     - Handle extraction disambiguation, decimal multipliers, and operator parsing.
-12. **`test_schemas.py` (7 tests)**:
-    - Pydantic v2 validation boundaries, platform limits, caption length, and gender sum validation.
-13. **`test_security.py` (9 tests)**:
-    - SHA-256 artifact integrity, regex metacharacter safety, prompt injection defense, CSV formula escaping.
+16. **`test_schemas.py` (8 tests)**:
+    - Pydantic v2 validation boundaries, platform limits, caption length, extra='forbid' rejection, and gender sum validation.
+17. **`test_security.py` (9 tests)**:
+    - SHA-256 artifact integrity with strict mode fail-closed verification, regex metacharacter safety, prompt injection defense, CSV formula escaping.
 
 ---
 

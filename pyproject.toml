@@ -5,8 +5,9 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "instagram-predictor"
 version = "2.0.0"
-description = "Enterprise-Grade Instagram AI Prediction & Analytics Engine"
+description = "Instagram & Multi-Platform AI Reach Simulation & Analytics Engine"
 readme = "README.md"
+license = { text = "MIT" }
 requires-python = ">=3.10"
 dependencies = [
     "pandas>=2.0.0",

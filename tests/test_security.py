@@ -80,6 +80,29 @@ def test_sec01_missing_metadata_or_hashes_graceful(monkeypatch):
         assert verify_artifact_integrity(tmp_model, "test_model") is True
 
 
+def test_sec01_strict_mode_raises_on_missing_or_unregistered(monkeypatch):
+    """Verify that in strict mode, missing metadata or unregistered hashes fail closed with SecurityError."""
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        tmp_model = Path(tmp_dir) / "test_model.joblib"
+        tmp_model.write_bytes(b"model-data")
+
+        # Non-existent metadata in strict mode
+        tmp_meta = Path(tmp_dir) / "nonexistent_meta.json"
+        monkeypatch.setattr(settings, "MODEL_METADATA_PATH", tmp_meta)
+        with pytest.raises(SecurityError, match="model_metadata.json does not exist"):
+            verify_artifact_integrity(tmp_model, "test_model", strict=True)
+
+        # Metadata without artifact_hashes in strict mode
+        tmp_meta.write_text(json.dumps({"version": "2.0.0"}))
+        with pytest.raises(SecurityError, match="artifact_hashes' is not populated"):
+            verify_artifact_integrity(tmp_model, "test_model", strict=True)
+
+        # Unregistered artifact in strict mode
+        tmp_meta.write_text(json.dumps({"artifact_hashes": {"other.joblib": "1234"}}))
+        with pytest.raises(SecurityError, match="not registered in artifact_hashes"):
+            verify_artifact_integrity(tmp_model, "test_model", strict=True)
+
+
 # =============================================================================
 # SEC-02: Regex DoS & Crash Prevention Tests
 # =============================================================================

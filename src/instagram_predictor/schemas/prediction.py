@@ -13,6 +13,10 @@ class ConfidenceInterval(BaseModel):
 class SimulationPrediction(BaseModel):
     projected_reach: ConfidenceInterval
     projected_impressions: ConfidenceInterval
+    projected_reach_90: Optional[ConfidenceInterval] = None
+    projected_impressions_90: Optional[ConfidenceInterval] = None
+    reach_90_ci: Optional[ConfidenceInterval] = None
+    impressions_90_ci: Optional[ConfidenceInterval] = None
     projected_engagement_rate: float = Field(description="Projected engagement rate percentage")
     projected_save_rate: float = Field(description="Projected save rate percentage")
     projected_share_rate: float = Field(description="Projected share rate percentage")
@@ -24,7 +28,7 @@ class SimulationPrediction(BaseModel):
     optimization_tips: List[str] = Field(default_factory=list)
     feature_explanations: Optional[Dict[str, Any]] = Field(
         default=None,
-        description="TreeSHAP feature importance and creative choice attribution drivers"
+        description="Exact Combinatorial Shapley Attribution (64 coalitions over 6 creative levers)"
     )
 
 

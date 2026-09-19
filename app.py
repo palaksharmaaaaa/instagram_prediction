@@ -62,8 +62,9 @@ app_mode = st.sidebar.radio(
     "Select Mode:",
     ["✨ Creator Mode (Simple)", "🔬 Pro / Data Scientist Mode"],
     index=0,
-    help="✨ Creator Mode (Simple): Clean, non-intimidating interface with quick post idea prompts and conversational AI strategy.\n🔬 Pro Mode: Deep engineering diagnostics, 54-slider simulator, and TreeSHAP waterfall."
+    help="✨ Creator Mode (Simple): Clean, non-intimidating interface with quick post idea prompts and conversational AI strategy.\n🔬 Pro Mode: Deep engineering diagnostics, 54-slider simulator, and Exact Combinatorial Shapley Attribution waterfall."
 )
+st.sidebar.caption("ℹ️ **Benchmark Transparency**: Models are calibrated on synthetic benchmark data (750 samples across 250 creators) for simulated creative lever exploration.")
 
 # =============================================================================
 # ✨ CREATOR MODE (SIMPLE) - Tailored for naive creators & marketers
@@ -71,6 +72,7 @@ app_mode = st.sidebar.radio(
 if app_mode == "✨ Creator Mode (Simple)":
     st.title("✨ AI Content Strategist & Post Studio")
     st.caption("Craft, simulate, and optimize viral post concepts with real-time algorithmic coaching and plain-English briefings.")
+    st.info("💡 **Benchmark Simulation Note**: Projections are powered by machine learning models calibrated on creator benchmark data. They evaluate the relative lift of creative levers (formats, timing, call-to-action hooks) before publishing.")
 
     # Initialize Creator State Defaults
     if "creator_prompt" not in st.session_state:
@@ -464,7 +466,8 @@ if app_mode == "✨ Creator Mode (Simple)":
 else:
     # Custom header
     st.title("⚡ Instagram AI Analytics & Prediction Engine")
-    st.caption("Enterprise-grade ML forecasting, post simulation, and audience analytics with real-time guardrails.")
+    st.caption("Machine learning forecasting, post simulation, and audience analytics with real-time guardrails.")
+    st.info("ℹ️ **Model & Benchmark Transparency**: GBDT pipelines are calibrated on a 750-sample benchmark dataset ($R^2 \\approx 0.84$). Mondrian conformal intervals quantify coverage over this benchmark distribution. Live Meta Graph API accounts import verified profile metrics, while what-if simulation models projected response across creative levers.")
 
     tabs = st.tabs([
         "🔍 NLP Profile Analytics & Search",
@@ -560,7 +563,7 @@ else:
             discovered_list = st.session_state.get("discovered_ig_accounts", [])
             if discovered_list:
                 account_labels = [
-                    f"@{acc['username']} ({acc['name']}) [ID: {acc['id']}]"
+                    f"@{acc['username']} ({acc.get('name', '')}) [ID: {acc.get('instagram_account_id') or acc.get('id', '')}]"
                     for acc in discovered_list
                 ]
                 chosen_acc_label = st.selectbox(
@@ -568,21 +571,31 @@ else:
                     account_labels,
                     index=0,
                 )
-                selected_account_id = discovered_list[account_labels.index(chosen_acc_label)]["id"]
+                chosen_entry = discovered_list[account_labels.index(chosen_acc_label)]
+                selected_account_id = chosen_entry.get("instagram_account_id") or chosen_entry.get("id")
+            else:
+                acc_id_manual = st.text_input(
+                    "Instagram Account ID (or auto-discover above):",
+                    value=st.session_state.get("manual_ig_account_id", ""),
+                    placeholder="e.g. 17841405822304914",
+                    help="Your Instagram Business/Creator Account numeric ID.",
+                )
+                if acc_id_manual:
+                    st.session_state["manual_ig_account_id"] = acc_id_manual
+                    selected_account_id = acc_id_manual.strip()
 
             fetch_creator_clicked = st.button("🚀 Fetch Live Creator Data & Insights", type="primary", width="stretch")
 
             if fetch_creator_clicked:
                 if not meta_token_input.strip():
                     st.error("Please provide a valid Meta User Access Token.")
+                elif not selected_account_id:
+                    st.error("Please select or specify a connected Instagram Account ID.")
                 else:
                     try:
                         with st.spinner("Streaming live profile, insights, and media objects from Meta Graph API..."):
-                            client = InstagramGraphAPIClient(
-                                access_token=meta_token_input,
-                                instagram_account_id=selected_account_id,
-                            )
-                            live_profile, live_demographics, live_media = client.fetch_full_creator_state()
+                            client = InstagramGraphAPIClient(access_token=meta_token_input)
+                            live_profile, live_demographics, live_media = client.fetch_full_creator_state(selected_account_id)
                             st.session_state["live_creator_profile"] = live_profile
                             st.session_state["live_creator_demographics"] = live_demographics
                             st.session_state["live_creator_media"] = live_media
@@ -614,9 +627,13 @@ else:
                 with c_m1:
                     st.metric("Followers", f"{lp.total_followers:,}")
                 with c_m2:
-                    st.metric("Following", f"{getattr(lp, 'raw_following', lp.total_following):,}")
+                    following_val = lp.raw_following if getattr(lp, "raw_following", None) is not None else lp.total_following
+                    st.metric("Following", f"{following_val:,}")
                 with c_m3:
                     st.metric("Media Posts", f"{lp.total_media_posts:,}")
+
+                if getattr(lp, "prior_metrics_estimated", False):
+                    st.info("ℹ️ **Data Ingestion Transparency**: Follower count, media posts, bio, and recent metrics are live from Meta Graph API. Secondary prior features (account age, 30-day growth rate) use standard baseline estimates.")
 
                 # Demographic Split
                 st.markdown("#### 👥 Live Audience Demographics (Meta Insights)")
@@ -1078,7 +1095,7 @@ else:
                     st.metric("Virality Tier", sim_res.virality_tier)
                     st.caption(f"Virality Score: {sim_res.virality_score:.4f}")
 
-                # TreeSHAP / Creative Feature Attribution Waterfall
+                # Exact Combinatorial Shapley Attribution / Creative Feature Attribution Waterfall
                 explanations = sim_res.feature_explanations
                 if not explanations:
                     # Fallback if not populated on simulation result
@@ -1094,7 +1111,7 @@ else:
                     final_reach = explanations["final_reach"]
                     drivers = explanations["drivers"]
 
-                    st.markdown("#### 🌳 Creative Choice Explainability & Algorithmic Levers (TreeSHAP Waterfall)")
+                    st.markdown("#### 🌳 Creative Choice Explainability & Algorithmic Levers (Exact Combinatorial Shapley Attribution Waterfall)")
 
                     measures = ["absolute"] + ["relative"] * len(drivers) + ["total"]
                     x_labels = ["Baseline Creator Reach"] + [d["name"] for d in drivers] + ["Final Forecasted Reach"]
@@ -1138,7 +1155,7 @@ else:
 
                     st.caption(
                         "💡 **How Algorithmic Levers Work:** The **Baseline Creator Reach** is the expected reach if this creator published an unoptimized static post during off-peak hours. "
-                        "Each creative choice (Media Format, Peak Timing, Hashtags, Call-to-Action, and Content Styles) acts as an algorithmic lever that either accelerates (green) or dampens (red) distribution based on our TreeSHAP attribution model."
+                        "Each creative choice (Media Format, Peak Timing, Hashtags, Call-to-Action, and Content Styles) acts as an algorithmic lever that either accelerates (green) or dampens (red) distribution based on our Exact Combinatorial Shapley Attribution model (evaluating 64 coalitions across 6 creative levers)."
                     )
 
                     with st.expander("📋 Detailed Creative Factor Impact Breakdown", expanded=False):
@@ -1334,5 +1351,5 @@ Raw Input (Profile + Media + Demographics)
 [ Mondrian Conformal Inductive Quantiles (80% & 90% Intervals) ]
    │
    ▼
-Output: Point Estimates + Coverage Bounds + TreeSHAP Attribution & AI Strategist Dialogue
+Output: Point Estimates + Coverage Bounds + Exact Combinatorial Shapley Attribution & AI Strategist Dialogue
 """, language="text")

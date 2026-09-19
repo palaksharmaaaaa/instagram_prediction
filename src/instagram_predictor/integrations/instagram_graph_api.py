@@ -5,7 +5,7 @@ import urllib.request
 import urllib.parse
 import urllib.error
 from datetime import datetime
-from typing import Optional, List, Dict, Any, Union
+from typing import Optional, List, Dict, Any, Union, Tuple
 
 from instagram_predictor.schemas.profile import (
     ProfileInput,
@@ -95,16 +95,17 @@ class MetaGraphAPIError(Exception):
 
 class InstagramGraphAPIClient:
     """
-    Client for the Meta Instagram Graph API.
+    Client for the Meta Instagram Graph API (v22.0).
     Provides methods to:
       1. Exchange short-lived tokens for 60-day long-lived tokens.
       2. Auto-discover linked Instagram Creator/Business accounts from Facebook Pages.
       3. Fetch creator profile metrics into a validated ProfileInput.
       4. Fetch recent media posts with performance metrics into validated PostInput objects.
       5. Fetch audience country, gender, and age distribution into a validated Demographics object.
+      6. Fetch full creator state (Profile, Demographics, Media) in a single unified method.
     """
 
-    DEFAULT_API_VERSION = "v19.0"
+    DEFAULT_API_VERSION = "v22.0"
     DEFAULT_BASE_URL = f"https://graph.facebook.com/{DEFAULT_API_VERSION}"
 
     def __init__(
@@ -345,20 +346,42 @@ class InstagramGraphAPIClient:
 
         return connected
 
+    def fetch_full_creator_state(
+        self,
+        instagram_account_id: str,
+        access_token: Optional[str] = None,
+        media_limit: int = 6,
+    ) -> Tuple[ProfileInput, Demographics, List[PostInput]]:
+        """
+        Fetches the complete creator state: validated profile, audience demographics, and recent media.
+        Synchronizes demographic country and categorizations cleanly across objects.
+        """
+        token = access_token or self.access_token
+        profile = self.fetch_profile_data(instagram_account_id, access_token=token)
+        demographics = self.fetch_audience_demographics(instagram_account_id, access_token=token)
+        media = self.fetch_recent_media(instagram_account_id, limit=media_limit, access_token=token)
+
+        # Synchronize country from demographics if available
+        if demographics and demographics.top_country and demographics.top_country != "US":
+            profile.country = demographics.top_country
+            profile.top_country = demographics.top_country
+
+        return profile, demographics, media
+
     def fetch_profile_data(
         self,
         instagram_account_id: str,
         access_token: Optional[str] = None,
     ) -> ProfileInput:
         """
-        Queries GET /{id}?fields=id,username,name,biography,followers_count,follows_count,media_count,profile_picture_url,website
-        and constructs a validated ProfileInput instance.
+        Queries GET /{id}?fields=id,username,name,biography,followers_count,follows_count,media_count,profile_picture_url,website,category
+        and constructs a validated ProfileInput instance with transparent estimation flags.
         """
         if not instagram_account_id or not str(instagram_account_id).strip():
             raise MetaGraphAPIError("An Instagram Account ID is required to fetch profile data.")
 
         account_id = str(instagram_account_id).strip()
-        fields = "id,username,name,biography,followers_count,follows_count,media_count,profile_picture_url,website"
+        fields = "id,username,name,biography,followers_count,follows_count,media_count,profile_picture_url,website,category"
         data = self._request(account_id, params={"fields": fields}, access_token=access_token)
 
         raw_following = int(data.get("follows_count", 0))
@@ -373,6 +396,28 @@ class InstagramGraphAPIClient:
 
         username = data.get("username") or f"ig_{account_id}"
 
+        # Resolve category from Meta API or map to best ContentCategory
+        meta_category = data.get("category") or ""
+        cat_lower = meta_category.lower()
+        if any(w in cat_lower for w in ["fitness", "gym", "health", "workout"]):
+            resolved_category = ContentCategory.HEALTH_FITNESS
+        elif any(w in cat_lower for w in ["sport", "athlete", "team", "football", "soccer", "basketball"]):
+            resolved_category = ContentCategory.SPORTS
+        elif any(w in cat_lower for w in ["tech", "software", "science", "engineer", "computer", "ai"]):
+            resolved_category = ContentCategory.SCIENCE_TECHNOLOGY
+        elif any(w in cat_lower for w in ["beauty", "fashion", "model", "cosmetic", "clothing", "apparel"]):
+            resolved_category = ContentCategory.FASHION_BEAUTY
+        elif any(w in cat_lower for w in ["food", "restaurant", "chef", "dining", "bakery", "cooking"]):
+            resolved_category = ContentCategory.FOOD_DINING
+        elif any(w in cat_lower for w in ["travel", "hotel", "destination", "tour", "flight"]):
+            resolved_category = ContentCategory.TRAVEL_EVENTS
+        elif any(w in cat_lower for w in ["business", "finance", "invest", "entrepreneur", "company", "consult"]):
+            resolved_category = ContentCategory.FINANCE_BUSINESS
+        elif any(w in cat_lower for w in ["education", "teacher", "school", "career", "university", "tutor"]):
+            resolved_category = ContentCategory.EDUCATION_CAREERS
+        else:
+            resolved_category = ContentCategory.MUSIC_ENTERTAINMENT
+
         profile = ProfileInput(
             username=username,
             full_name=data.get("name") or username,
@@ -385,13 +430,15 @@ class InstagramGraphAPIClient:
             follower_growth_rate_30d=0.02,
             account_bio_has_link=has_bio_link,
             is_verified=False,
-            account_category=ContentCategory.MUSIC_ENTERTAINMENT,
+            account_category=resolved_category,
         )
 
-        # Attach raw attributes for UI display
+        # Attach raw attributes and transparent estimation flags
         setattr(profile, "profile_picture_url", data.get("profile_picture_url"))
         setattr(profile, "biography", biography)
         setattr(profile, "raw_following", raw_following)
+        setattr(profile, "meta_category_raw", meta_category)
+        setattr(profile, "prior_metrics_estimated", True)
         return profile
 
     def fetch_recent_media(
@@ -410,10 +457,10 @@ class InstagramGraphAPIClient:
         account_id = str(instagram_account_id).strip()
         clamped_limit = min(max(1, limit), 100)
 
-        # Nested field query for media fields & post insights
+        # Nested field query for media fields & post insights (supporting modern v21/v22 metrics)
         combined_fields = (
             "id,caption,media_type,media_product_type,timestamp,like_count,comments_count,permalink,"
-            "insights.metric(reach,impressions,saved,shares,video_views)"
+            "insights.metric(reach,impressions,views,saved,shares,video_views)"
         )
 
         try:
@@ -490,8 +537,9 @@ class InstagramGraphAPIClient:
             shares = max(0, insights_map.get("shares", 0))
             saves = max(0, insights_map.get("saved", 0))
             reach = insights_map.get("reach")
-            impressions = insights_map.get("impressions")
-            video_views = insights_map.get("video_views")
+            views_val = insights_map.get("views")
+            impressions = insights_map.get("impressions") or views_val
+            video_views = insights_map.get("video_views") or views_val
 
             metrics = PostMetrics(
                 likes=likes,
@@ -509,11 +557,41 @@ class InstagramGraphAPIClient:
             cta_pattern = r"\b(comment|share|save|tap|link in bio|follow|dm|tag)\b"
             has_cta = bool(re.search(cta_pattern, caption, re.IGNORECASE))
 
+            # Infer category and style from caption keywords instead of hardcoding
+            c_low = caption.lower()
+            if any(w in c_low for w in ["fitness", "workout", "gym", "health", "diet"]):
+                post_cat = ContentCategory.HEALTH_FITNESS
+            elif any(w in c_low for w in ["tech", "software", "ai", "coding", "crypto"]):
+                post_cat = ContentCategory.SCIENCE_TECHNOLOGY
+            elif any(w in c_low for w in ["travel", "vacation", "trip", "explore"]):
+                post_cat = ContentCategory.TRAVEL_EVENTS
+            elif any(w in c_low for w in ["fashion", "style", "outfit", "beauty"]):
+                post_cat = ContentCategory.FASHION_BEAUTY
+            elif any(w in c_low for w in ["food", "recipe", "cook", "dining"]):
+                post_cat = ContentCategory.FOOD_DINING
+            elif any(w in c_low for w in ["business", "finance", "money", "career"]):
+                post_cat = ContentCategory.FINANCE_BUSINESS
+            elif any(w in c_low for w in ["sport", "football", "soccer", "match"]):
+                post_cat = ContentCategory.SPORTS
+            else:
+                post_cat = ContentCategory.MUSIC_ENTERTAINMENT
+
+            if any(w in c_low for w in ["how to", "tips", "tutorial", "guide", "lesson"]):
+                post_style = ContentStyle.EDUCATIONAL
+            elif any(w in c_low for w in ["promo", "discount", "sale", "shop", "link in bio"]):
+                post_style = ContentStyle.PROMOTIONAL
+            elif any(w in c_low for w in ["story", "journey", "lesson", "mindset"]):
+                post_style = ContentStyle.INSPIRATIONAL
+            elif any(w in c_low for w in ["behind the scenes", "bts", "process"]):
+                post_style = ContentStyle.BEHIND_THE_SCENES
+            else:
+                post_style = ContentStyle.ENTERTAINING
+
             post = PostInput(
                 media_type=media_type,
-                category=ContentCategory.MUSIC_ENTERTAINMENT,
-                categorizations=[ContentStyle.ENTERTAINING],
-                categorization=ContentStyle.ENTERTAINING,
+                category=post_cat,
+                categorizations=[post_style],
+                categorization=post_style,
                 caption_length_chars=min(len(caption), 2200),
                 hashtags_count=min(len(hashtags), 30),
                 mentions_count=min(len(mentions), 20),

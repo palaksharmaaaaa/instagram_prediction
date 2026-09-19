@@ -56,20 +56,26 @@ def format_simulation_for_interpretation(
         reach_lower_80 = prediction.projected_reach.lower
         reach_upper_80 = prediction.projected_reach.upper
 
-        # Estimate 90% CI from 80% CI if only 80% is in object
-        lower_delta = reach_point - reach_lower_80
-        upper_delta = reach_upper_80 - reach_point
-        reach_lower_90 = max(50, int(reach_point - lower_delta * 1.35))
-        reach_upper_90 = max(reach_point, int(reach_point + upper_delta * 1.35))
+        # Extract calibrated 90% conformal intervals directly from SimulationPrediction
+        r90 = getattr(prediction, "reach_90_ci", None) or getattr(prediction, "projected_reach_90", None)
+        if r90 is not None:
+            reach_lower_90 = r90.lower
+            reach_upper_90 = r90.upper
+        else:
+            reach_lower_90 = max(50, int(reach_point * 0.65))
+            reach_upper_90 = max(reach_point, int(reach_point * 1.45))
 
         imp_point = prediction.projected_impressions.point_estimate
         imp_lower_80 = prediction.projected_impressions.lower
         imp_upper_80 = prediction.projected_impressions.upper
 
-        imp_lower_delta = imp_point - imp_lower_80
-        imp_upper_delta = imp_upper_80 - imp_point
-        imp_lower_90 = max(reach_lower_90, int(imp_point - imp_lower_delta * 1.35))
-        imp_upper_90 = max(imp_point, int(imp_point + imp_upper_delta * 1.35))
+        i90 = getattr(prediction, "impressions_90_ci", None) or getattr(prediction, "projected_impressions_90", None)
+        if i90 is not None:
+            imp_lower_90 = i90.lower
+            imp_upper_90 = i90.upper
+        else:
+            imp_lower_90 = max(reach_lower_90, int(imp_point * 0.70))
+            imp_upper_90 = max(imp_point, int(imp_point * 1.45))
 
         return {
             "predicted_reach": reach_point,
@@ -133,21 +139,17 @@ def _normalize_simulation_dict(
     default_r80_upper = max(reach, int(reach * 1.30))
     reach_80 = extract_ci(data.get("reach_80_ci") or data.get("projected_reach"), default_r80_lower, default_r80_upper)
 
-    lower_delta = reach - reach_80[0]
-    upper_delta = reach_80[1] - reach
-    default_r90_lower = max(50, int(reach - lower_delta * 1.35))
-    default_r90_upper = max(reach, int(reach + upper_delta * 1.35))
-    reach_90 = extract_ci(data.get("reach_90_ci"), default_r90_lower, default_r90_upper)
+    default_r90_lower = max(50, int(reach * 0.65))
+    default_r90_upper = max(reach, int(reach * 1.45))
+    reach_90 = extract_ci(data.get("reach_90_ci") or data.get("projected_reach_90"), default_r90_lower, default_r90_upper)
 
     default_i80_lower = max(reach_80[0], int(impressions * 0.80))
     default_i80_upper = max(impressions, int(impressions * 1.30))
     imp_80 = extract_ci(data.get("impressions_80_ci") or data.get("projected_impressions"), default_i80_lower, default_i80_upper)
 
-    imp_lower_delta = impressions - imp_80[0]
-    imp_upper_delta = imp_80[1] - impressions
-    default_i90_lower = max(reach_90[0], int(impressions - imp_lower_delta * 1.35))
-    default_i90_upper = max(impressions, int(impressions + imp_upper_delta * 1.35))
-    imp_90 = extract_ci(data.get("impressions_90_ci"), default_i90_lower, default_i90_upper)
+    default_i90_lower = max(reach_90[0], int(impressions * 0.70))
+    default_i90_upper = max(impressions, int(impressions * 1.45))
+    imp_90 = extract_ci(data.get("impressions_90_ci") or data.get("projected_impressions_90"), default_i90_lower, default_i90_upper)
 
     # Engagement rate
     er = data.get("engagement_rate")
@@ -587,7 +589,7 @@ def _generate_dialogue_markdown(
         "",
         "---",
         "",
-        "#### 🌳 Algorithmic Drivers & Levers (TreeSHAP Attribution)",
+        "#### 🌳 Algorithmic Drivers & Levers (Exact Combinatorial Shapley Attribution)",
     ])
 
     if key_drivers:
@@ -616,7 +618,7 @@ def interpret_simulation_result(
     prompt: Optional[str] = None
 ) -> Dict[str, Any]:
     """
-    Translates raw ML simulation results and TreeSHAP attributions into a conversational,
+    Translates raw ML simulation results and Exact Combinatorial Shapley attributions into a conversational,
     prompt-response dialogue that feels like a real-time AI strategist explaining
     the post to a creator.
 
@@ -628,7 +630,7 @@ def interpret_simulation_result(
             - `reach_90_ci`: tuple/dict (lower, upper)
             - `impressions_80_ci`: tuple/dict (lower, upper)
             - `impressions_90_ci`: tuple/dict (lower, upper)
-            - `feature_explanations`: dict of TreeSHAP attribution drivers
+            - `feature_explanations`: dict of Exact Combinatorial Shapley attribution drivers
             - `engagement_rate`: float
             - `virality_tier`: str
             - `platform`: str
