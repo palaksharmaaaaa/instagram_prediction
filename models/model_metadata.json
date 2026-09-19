@@ -1,0 +1,124 @@
+{
+  "version": "2.0.0",
+  "trained_at": "2026-09-19T15:40:41.678899+00:00",
+  "training_samples": 750,
+  "target_transformation": "log1p / expm1",
+  "validation_strategy": "GroupKFold by creator username",
+  "features": {
+    "numeric": [
+      "total_followers",
+      "total_following",
+      "total_media_posts",
+      "account_age_years",
+      "posting_frequency_per_week",
+      "follower_growth_rate_30d",
+      "follower_following_ratio",
+      "log_followers",
+      "log_following",
+      "log_posts",
+      "per_media_likes",
+      "per_media_comments",
+      "per_media_shares",
+      "per_media_saves",
+      "per_media_video_views",
+      "per_media_completion_rate",
+      "caption_length_chars",
+      "hashtags_count",
+      "mentions_count",
+      "has_call_to_action",
+      "video_duration_seconds",
+      "carousel_slide_count",
+      "posted_hour_of_day",
+      "is_weekend",
+      "is_peak_posting_hour",
+      "gender_female_pct",
+      "gender_male_pct",
+      "audience_activity_score",
+      "reach_from_home_pct",
+      "reach_from_explore_pct",
+      "reach_from_hashtags_pct",
+      "is_educational",
+      "is_entertaining",
+      "is_promotional",
+      "is_behind_scenes",
+      "is_inspirational",
+      "reach_potential",
+      "virality_momentum",
+      "save_efficiency",
+      "interaction_density",
+      "explore_discovery_potential",
+      "call_to_action_boost",
+      "watch_efficiency",
+      "hashtag_density"
+    ],
+    "categorical": [
+      "media_type",
+      "category",
+      "categorization",
+      "top_country",
+      "secondary_country",
+      "primary_age_group",
+      "posted_day_of_week"
+    ]
+  },
+  "evaluation": {
+    "reach": {
+      "group_cv_r2_mean": 0.9262929916507752,
+      "group_cv_r2_std": 0.02081817833128873,
+      "group_cv_mae_mean": 3532406.5740037053,
+      "conformal_quantile_80": 0.30625566178047237,
+      "conformal_quantile_90": 0.39306658879146794,
+      "tier_conformal_quantiles": {
+        "nano": {
+          "q80": 0.30625566178047237,
+          "q90": 0.39306658879146794,
+          "sample_count": 0
+        },
+        "micro": {
+          "q80": 0.3239424441058816,
+          "q90": 0.49912739389138405,
+          "sample_count": 36
+        },
+        "macro": {
+          "q80": 0.2621068870206134,
+          "q90": 0.3640420761487686,
+          "sample_count": 33
+        },
+        "mega": {
+          "q80": 0.30525280718969583,
+          "q90": 0.3577577179121363,
+          "sample_count": 81
+        }
+      }
+    },
+    "impressions": {
+      "group_cv_r2_mean": 0.8887009489986817,
+      "group_cv_r2_std": 0.04127056278152108,
+      "group_cv_mae_mean": 6324089.195395103,
+      "conformal_quantile_80": 0.37536315785140173,
+      "conformal_quantile_90": 0.4688449224636521,
+      "tier_conformal_quantiles": {
+        "nano": {
+          "q80": 0.37536315785140173,
+          "q90": 0.4688449224636521,
+          "sample_count": 0
+        },
+        "micro": {
+          "q80": 0.39272959438075716,
+          "q90": 0.5756885993582195,
+          "sample_count": 36
+        },
+        "macro": {
+          "q80": 0.27298196664843244,
+          "q90": 0.41531184802820675,
+          "sample_count": 33
+        },
+        "mega": {
+          "q80": 0.3713760628624474,
+          "q90": 0.46350497086364584,
+          "sample_count": 81
+        }
+      }
+    }
+  }
+}

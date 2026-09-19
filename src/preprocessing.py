@@ -1,6 +1,6 @@
+import os
 import pandas as pd
 import numpy as np
-
 
 NUMERIC_COLUMNS = [
     "Likes",
@@ -19,32 +19,35 @@ NUMERIC_COLUMNS = [
     "Engagement Rate (60 Days)"
 ]
 
+CATEGORICAL_COLUMNS = [
+    "Country",
+    "Main topic",
+    "Main video category"
+]
+
 
 def load_data(path):
+    """
+    Loads dataset, removes duplicates, and standardizes data types
+    without pre-imputing global medians (preventing data leakage).
+    """
+    if not os.path.exists(path):
+        raise FileNotFoundError(f"Dataset file not found at: {path}")
+
     df = pd.read_csv(path)
 
     # Remove duplicate rows
-    df = df.drop_duplicates()
+    df = df.drop_duplicates().reset_index(drop=True)
 
-    # Convert numeric columns
+    # Convert numeric columns to proper float/int types
     for col in NUMERIC_COLUMNS:
         if col in df.columns:
             df[col] = pd.to_numeric(df[col], errors="coerce")
 
-    # Fill numerical missing values
-    for col in NUMERIC_COLUMNS:
+    # Clean string columns
+    for col in CATEGORICAL_COLUMNS:
         if col in df.columns:
-            df[col] = df[col].fillna(df[col].median())
-
-    # Fill categorical missing values
-    categorical_columns = [
-        "Country",
-        "Main topic",
-        "Main video category"
-    ]
-
-    for col in categorical_columns:
-        if col in df.columns:
-            df[col] = df[col].fillna("Unknown")
+            df[col] = df[col].astype(str).str.strip()
+            df[col] = df[col].replace({"nan": np.nan, "": np.nan, "None": np.nan})
 
     return df
