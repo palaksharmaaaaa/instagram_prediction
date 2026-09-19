@@ -21,11 +21,15 @@ def detect_profile_anomalies(
         )
 
     # 2. Suspicious like-to-comment ratio: Normal ratio is 10:1 to 100:1
-    if avg_comments > 0 and avg_likes > 0:
+    if avg_comments == 0 and avg_likes > 100:
+        anomalies.append(
+            f"SUSPICIOUS_ENGAGEMENT: Zero comments detected alongside high like volume ({int(avg_likes):,}). High likelihood of purchased or bot likes."
+        )
+    elif avg_comments > 0 and avg_likes > 0:
         ratio = avg_likes / avg_comments
         if ratio > 500:
             anomalies.append(
-                "UNUSUAL_LIKE_SPIKE: Likes to comments ratio exceeds 500:1, indicating potential like purchasing."
+                f"UNUSUAL_LIKE_SPIKE: Likes to comments ratio exceeds 500:1 ({avg_likes/avg_comments:.1f}:1)."
             )
         elif ratio < 1.0:
             anomalies.append(

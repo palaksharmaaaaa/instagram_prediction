@@ -1,9 +1,15 @@
 {
   "version": "2.0.0",
-  "trained_at": "2026-09-19T15:40:41.678899+00:00",
+  "trained_at": "2026-09-19T16:29:23.921300+00:00",
   "training_samples": 750,
   "target_transformation": "log1p / expm1",
   "validation_strategy": "GroupKFold by creator username",
+  "artifact_hashes": {
+    "reach_pipeline.joblib": "e7418ea81bfd4d304408d30d1884fa5be12fc1831b587359097d38a9f8aa8391",
+    "impressions_pipeline.joblib": "2eddea8de4865d9d660d4e2cda6ecb96c4347286a17105816e56fa32e0308376",
+    "reach_pipeline": "e7418ea81bfd4d304408d30d1884fa5be12fc1831b587359097d38a9f8aa8391",
+    "impressions_pipeline": "2eddea8de4865d9d660d4e2cda6ecb96c4347286a17105816e56fa32e0308376"
+  },
   "features": {
     "numeric": [
       "total_followers",
@@ -42,7 +48,7 @@
       "is_promotional",
       "is_behind_scenes",
       "is_inspirational",
-      "reach_potential",
+      "creator_scale_engagement",
       "virality_momentum",
       "save_efficiency",
       "interaction_density",
@@ -63,60 +69,60 @@
   },
   "evaluation": {
     "reach": {
-      "group_cv_r2_mean": 0.9262929916507752,
-      "group_cv_r2_std": 0.02081817833128873,
-      "group_cv_mae_mean": 3532406.5740037053,
-      "conformal_quantile_80": 0.30625566178047237,
-      "conformal_quantile_90": 0.39306658879146794,
+      "group_cv_r2_mean": 0.9389426690250527,
+      "group_cv_r2_std": 0.01961144054815766,
+      "group_cv_mae_mean": 2951289.5410324256,
+      "conformal_quantile_80": 0.3101824869751155,
+      "conformal_quantile_90": 0.41601133062377293,
       "tier_conformal_quantiles": {
         "nano": {
-          "q80": 0.30625566178047237,
-          "q90": 0.39306658879146794,
-          "sample_count": 0
-        },
-        "micro": {
-          "q80": 0.3239424441058816,
-          "q90": 0.49912739389138405,
+          "q80": 0.4986754967509146,
+          "q90": 0.6177090446442728,
           "sample_count": 36
         },
+        "micro": {
+          "q80": 0.28539643522252867,
+          "q90": 0.3656075236493894,
+          "sample_count": 42
+        },
         "macro": {
-          "q80": 0.2621068870206134,
-          "q90": 0.3640420761487686,
-          "sample_count": 33
+          "q80": 0.22847131488879668,
+          "q90": 0.3550793145957041,
+          "sample_count": 42
         },
         "mega": {
-          "q80": 0.30525280718969583,
-          "q90": 0.3577577179121363,
-          "sample_count": 81
+          "q80": 0.41674722036326983,
+          "q90": 0.8161273395515547,
+          "sample_count": 30
         }
       }
     },
     "impressions": {
-      "group_cv_r2_mean": 0.8887009489986817,
-      "group_cv_r2_std": 0.04127056278152108,
-      "group_cv_mae_mean": 6324089.195395103,
-      "conformal_quantile_80": 0.37536315785140173,
-      "conformal_quantile_90": 0.4688449224636521,
+      "group_cv_r2_mean": 0.8957558788059972,
+      "group_cv_r2_std": 0.04854593064056559,
+      "group_cv_mae_mean": 5152141.221979537,
+      "conformal_quantile_80": 0.3486984503376451,
+      "conformal_quantile_90": 0.48580399164623866,
       "tier_conformal_quantiles": {
         "nano": {
-          "q80": 0.37536315785140173,
-          "q90": 0.4688449224636521,
-          "sample_count": 0
-        },
-        "micro": {
-          "q80": 0.39272959438075716,
-          "q90": 0.5756885993582195,
+          "q80": 0.48580399164623866,
+          "q90": 0.606947554412602,
           "sample_count": 36
         },
+        "micro": {
+          "q80": 0.34740339189680824,
+          "q90": 0.47667046850107475,
+          "sample_count": 42
+        },
         "macro": {
-          "q80": 0.27298196664843244,
-          "q90": 0.41531184802820675,
-          "sample_count": 33
+          "q80": 0.33559494451261074,
+          "q90": 0.4527273662637281,
+          "sample_count": 42
         },
         "mega": {
-          "q80": 0.3713760628624474,
-          "q90": 0.46350497086364584,
-          "sample_count": 81
+          "q80": 0.5137864196871025,
+          "q90": 0.8355961967298278,
+          "sample_count": 30
         }
       }
     }

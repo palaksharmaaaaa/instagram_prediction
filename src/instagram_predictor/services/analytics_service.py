@@ -1,4 +1,4 @@
-from typing import Tuple, Dict, Any
+from typing import Tuple, Dict, Any, Optional
 import numpy as np
 import pandas as pd
 
@@ -26,9 +26,9 @@ def apply_query_filters(df: pd.DataFrame, filters: Dict[str, Any]) -> pd.DataFra
             cat_query = str(cond).lower()
             acc_cats = result["account_categories_str"].astype(str).str.lower() if "account_categories_str" in result.columns else pd.Series("", index=result.index)
             mask = (
-                result["category"].astype(str).str.lower().str.contains(cat_query, na=False)
-                | result["account_category"].astype(str).str.lower().str.contains(cat_query, na=False)
-                | acc_cats.str.contains(cat_query, na=False)
+                result["category"].astype(str).str.lower().str.contains(cat_query, regex=False, na=False)
+                | result["account_category"].astype(str).str.lower().str.contains(cat_query, regex=False, na=False)
+                | acc_cats.str.contains(cat_query, regex=False, na=False)
             )
             result = result[mask]
             continue
@@ -36,7 +36,7 @@ def apply_query_filters(df: pd.DataFrame, filters: Dict[str, Any]) -> pd.DataFra
         # Categorization / Content Style
         if col == "categorization":
             style_query = str(cond).lower()
-            mask = result["categorization"].astype(str).str.lower().str.contains(style_query, na=False)
+            mask = result["categorization"].astype(str).str.lower().str.contains(style_query, regex=False, na=False)
             result = result[mask]
             continue
 
@@ -60,8 +60,8 @@ def apply_query_filters(df: pd.DataFrame, filters: Dict[str, Any]) -> pd.DataFra
         if col == "username":
             u_query = str(cond).lower().lstrip("@")
             mask = (
-                result["username"].astype(str).str.lower().str.contains(u_query, na=False)
-                | result["full_name"].astype(str).str.lower().str.contains(u_query, na=False)
+                result["username"].astype(str).str.lower().str.contains(u_query, regex=False, na=False)
+                | result["full_name"].astype(str).str.lower().str.contains(u_query, regex=False, na=False)
             )
             result = result[mask]
             continue
@@ -100,12 +100,16 @@ def apply_query_filters(df: pd.DataFrame, filters: Dict[str, Any]) -> pd.DataFra
     return result.reset_index(drop=True)
 
 
-def run_analytics_pipeline(prompt: str) -> Tuple[ParsedQuery, pd.DataFrame]:
+def run_analytics_pipeline(
+    prompt: str,
+    df: Optional[pd.DataFrame] = None
+) -> Tuple[ParsedQuery, pd.DataFrame]:
     """
     End-to-end service coordinating query parsing, filtering, and predictive modeling.
     """
     parsed_query = parse_query(prompt)
-    df = load_dataset()
+    if df is None:
+        df = load_dataset()
 
     filtered_df = apply_query_filters(df, parsed_query.filters)
 

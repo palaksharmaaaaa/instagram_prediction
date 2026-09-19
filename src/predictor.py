@@ -1,3 +1,16 @@
+"""
+Legacy Predictor Module (v1 Prototype Architecture)
+===================================================
+DEPRECATION NOTICE:
+This module represents the v1 prototype architecture and is maintained solely for
+backward compatibility with legacy scripts and tests (e.g., tests/test_end_to_end.py).
+
+Production systems should use the enterprise-grade `instagram_predictor` package:
+- Inference & Simulation: `instagram_predictor.models` (e.g. `predict_batch`, `simulate_post_performance`)
+- Registry & Pipelines: `instagram_predictor.models.registry` (`get_reach_pipeline`, `get_impressions_pipeline`)
+- Query Filtering: `instagram_predictor.services.analytics_service` (`apply_query_filters`)
+"""
+
 import os
 import joblib
 import pandas as pd
@@ -70,8 +83,8 @@ def apply_filter(df, filters):
         if column == "category":
             cat_query = str(condition).lower()
             mask = (
-                result["Main topic"].astype(str).str.lower().str.contains(cat_query, na=False)
-                | result["Main video category"].astype(str).str.lower().str.contains(cat_query, na=False)
+                result["Main topic"].astype(str).str.lower().str.contains(cat_query, regex=False, na=False)
+                | result["Main video category"].astype(str).str.lower().str.contains(cat_query, regex=False, na=False)
             )
             result = result[mask]
             continue
@@ -86,8 +99,8 @@ def apply_filter(df, filters):
         if column == "Username":
             u_query = str(condition).lower().lstrip("@")
             mask = (
-                result["Username"].astype(str).str.lower().str.contains(u_query, na=False)
-                | result["Channel Name"].astype(str).str.lower().str.contains(u_query, na=False)
+                result["Username"].astype(str).str.lower().str.contains(u_query, regex=False, na=False)
+                | result["Channel Name"].astype(str).str.lower().str.contains(u_query, regex=False, na=False)
             )
             result = result[mask]
             continue

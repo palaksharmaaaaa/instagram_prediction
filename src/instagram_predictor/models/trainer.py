@@ -1,3 +1,4 @@
+import hashlib
 import json
 import os
 from datetime import datetime, timezone
@@ -69,6 +70,19 @@ def build_transformed_pipeline() -> TransformedTargetRegressor:
     )
 
 
+def compute_conformal_quantile(scores: np.ndarray, alpha: float) -> float:
+    """
+    Computes mathematically exact finite-sample conformal prediction quantiles:
+    p = min(ceil((n + 1) * (1 - alpha)) / n, 1.0)
+    using method='higher' to guarantee conservative finite-sample coverage.
+    """
+    n = len(scores)
+    if n == 0:
+        return 0.35
+    p = min(np.ceil((n + 1) * (1 - alpha)) / n, 1.0)
+    return float(np.quantile(scores, p, method="higher"))
+
+
 def train_and_persist_pipelines():
     """
     Trains Reach and Impressions pipelines with creator-level GroupKFold CV,
@@ -136,10 +150,10 @@ def train_and_persist_pipelines():
     imp_scores = np.abs(np.log1p(y_i_calib) - np.log1p(imp_calib_preds))
 
     # Global conformal quantiles for 80% (alpha=0.20) and 90% (alpha=0.10)
-    q_reach_80 = float(np.quantile(reach_scores, 0.80))
-    q_reach_90 = float(np.quantile(reach_scores, 0.90))
-    q_imp_80 = float(np.quantile(imp_scores, 0.80))
-    q_imp_90 = float(np.quantile(imp_scores, 0.90))
+    q_reach_80 = compute_conformal_quantile(reach_scores, 0.20)
+    q_reach_90 = compute_conformal_quantile(reach_scores, 0.10)
+    q_imp_80 = compute_conformal_quantile(imp_scores, 0.20)
+    q_imp_90 = compute_conformal_quantile(imp_scores, 0.10)
 
     # Mondrian (Tier-Conditional) Conformal Prediction
     # Stratified calibration across creator scale tiers: nano (<10k), micro (10k-100k), macro (100k-1M), mega (>=1M)
@@ -160,13 +174,13 @@ def train_and_persist_pipelines():
             tier_r_scores = reach_scores[mask]
             tier_i_scores = imp_scores[mask]
             tier_quantiles_reach[tier_name] = {
-                "q80": float(np.quantile(tier_r_scores, 0.80)),
-                "q90": float(np.quantile(tier_r_scores, 0.90)),
+                "q80": compute_conformal_quantile(tier_r_scores, 0.20),
+                "q90": compute_conformal_quantile(tier_r_scores, 0.10),
                 "sample_count": int(np.sum(mask))
             }
             tier_quantiles_imp[tier_name] = {
-                "q80": float(np.quantile(tier_i_scores, 0.80)),
-                "q90": float(np.quantile(tier_i_scores, 0.90)),
+                "q80": compute_conformal_quantile(tier_i_scores, 0.20),
+                "q90": compute_conformal_quantile(tier_i_scores, 0.10),
                 "sample_count": int(np.sum(mask))
             }
         else:
@@ -196,12 +210,28 @@ def train_and_persist_pipelines():
     joblib.dump(final_reach_pipeline, settings.REACH_MODEL_PATH)
     joblib.dump(final_imp_pipeline, settings.IMPRESSIONS_MODEL_PATH)
 
+    def _compute_sha256(path: Path) -> str:
+        sha = hashlib.sha256()
+        with open(path, "rb") as f:
+            for chunk in iter(lambda: f.read(65536), b""):
+                sha.update(chunk)
+        return sha.hexdigest()
+
+    reach_hash = _compute_sha256(settings.REACH_MODEL_PATH)
+    imp_hash = _compute_sha256(settings.IMPRESSIONS_MODEL_PATH)
+
     metadata = {
         "version": settings.VERSION,
         "trained_at": datetime.now(timezone.utc).isoformat(),
         "training_samples": len(df),
         "target_transformation": "log1p / expm1",
         "validation_strategy": "GroupKFold by creator username",
+        "artifact_hashes": {
+            settings.REACH_MODEL_PATH.name: reach_hash,
+            settings.IMPRESSIONS_MODEL_PATH.name: imp_hash,
+            "reach_pipeline": reach_hash,
+            "impressions_pipeline": imp_hash,
+        },
         "features": {
             "numeric": FEATURE_COLUMNS_NUMERIC,
             "categorical": FEATURE_COLUMNS_CATEGORICAL

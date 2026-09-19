@@ -1,8 +1,27 @@
+"""
+Legacy Pipeline Module (v1 Prototype Architecture)
+==================================================
+DEPRECATION NOTICE:
+This module represents the v1 prototype pipeline and is maintained solely for
+backward compatibility with legacy test suites (e.g., tests/test_end_to_end.py).
+
+Production systems should use the enterprise-grade `instagram_predictor` package:
+- Analytics pipeline: `instagram_predictor.services.run_analytics_pipeline`
+- Post simulation: `instagram_predictor.services.run_post_simulation`
+- Model inference: `instagram_predictor.models.predict_batch`
+"""
+
 import os
 import pandas as pd
-from preprocessing import load_data
-from prompt_parser import parse_prompt
-from predictor import apply_filter, predict
+
+try:
+    from preprocessing import load_data
+    from prompt_parser import parse_prompt
+    from predictor import apply_filter, predict
+except ModuleNotFoundError:
+    from src.preprocessing import load_data
+    from src.prompt_parser import parse_prompt
+    from src.predictor import apply_filter, predict
 
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DATA_PATH = os.path.join(BASE_DIR, "data", "top_200_instagrammers.csv")

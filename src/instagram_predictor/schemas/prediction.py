@@ -7,6 +7,7 @@ class ConfidenceInterval(BaseModel):
     point_estimate: int = Field(ge=0)
     upper: int = Field(ge=0)
     confidence_level: float = Field(default=0.80)
+    level: Optional[str] = Field(default=None, description="Actual coverage level applied, e.g. '80% Mondrian Conformal Coverage'")
 
 
 class SimulationPrediction(BaseModel):

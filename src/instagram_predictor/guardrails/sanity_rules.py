@@ -65,6 +65,16 @@ def validate_media_sanity(
             f"Invalid metric relation: Likes ({likes:,}) cannot exceed Impressions ({impressions:,})."
         )
 
+    if comments > impressions and impressions > 0:
+        violations.append(
+            f"Invalid metric relation: Comments ({comments:,}) cannot exceed Impressions ({impressions:,})."
+        )
+
+    if shares > impressions and impressions > 0:
+        violations.append(
+            f"Invalid metric relation: Shares ({shares:,}) cannot exceed Impressions ({impressions:,})."
+        )
+
     if saves > impressions and impressions > 0:
         violations.append(
             f"Invalid metric relation: Saves ({saves:,}) cannot exceed Impressions ({impressions:,})."

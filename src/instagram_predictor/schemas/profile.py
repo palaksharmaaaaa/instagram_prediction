@@ -42,6 +42,24 @@ class Demographics(BaseModel):
     def clean_country(cls, v: str) -> str:
         return v.strip().upper()
 
+    @model_validator(mode="before")
+    @classmethod
+    def sync_gender_pct(cls, data: Any) -> Any:
+        if isinstance(data, dict):
+            if "gender_female_pct" in data and "gender_male_pct" not in data:
+                data["gender_male_pct"] = round(1.0 - float(data["gender_female_pct"]), 4)
+            elif "gender_male_pct" in data and "gender_female_pct" not in data:
+                data["gender_female_pct"] = round(1.0 - float(data["gender_male_pct"]), 4)
+        return data
+
+    @model_validator(mode="after")
+    def validate_gender_sum(self) -> "Demographics":
+        if abs((self.gender_female_pct + self.gender_male_pct) - 1.0) > 0.05:
+            raise ValueError(
+                f"Demographics female and male percentages must sum to 1.0 (got {self.gender_female_pct + self.gender_male_pct:.2f})"
+            )
+        return self
+
 
 class PostMetrics(BaseModel):
     likes: int = Field(default=0, ge=0)
@@ -95,7 +113,7 @@ class PostInput(BaseModel):
     category: ContentCategory = Field(default=ContentCategory.SPORTS, description="Single primary category for this media post")
     categorizations: List[ContentStyle] = Field(default_factory=list, description="Array of content style categorizations for this media post")
     categorization: Optional[ContentStyle] = Field(default=None, description="Primary content style (backward-compatible)")
-    caption_length_chars: int = Field(default=220, ge=0, description="Character count of the post caption")
+    caption_length_chars: int = Field(default=220, ge=0, le=2200, description="Character count of the post caption")
     hashtags_count: int = Field(default=5, ge=0, le=30, description="Number of hashtags used (0 to 30)")
     mentions_count: int = Field(default=1, ge=0, le=20, description="Number of tagged user handles")
     has_call_to_action: bool = Field(default=True, description="Whether post explicitly prompts save/share/comment")

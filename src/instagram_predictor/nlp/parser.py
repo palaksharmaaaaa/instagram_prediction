@@ -1,3 +1,4 @@
+import html
 import re
 from typing import Any, Dict, List, Optional
 from ..schemas import ParsedQuery, ContentCategory, MediaType, ContentStyle
@@ -82,7 +83,7 @@ def _parse_multiplier(unit: Optional[str]) -> float:
 
 
 def _parse_op(word: str) -> str:
-    w = word.lower().strip()
+    w = html.unescape(word.lower().strip())
     if w in ["above", "over", "more than", "greater than", "higher than", ">"]:
         return ">"
     if w in ["at least", "min", "minimum", ">="]:
@@ -92,6 +93,15 @@ def _parse_op(word: str) -> str:
     if w in ["at most", "max", "maximum", "up to", "<="]:
         return "<="
     return ">="
+
+
+def _parse_num(num_str: str) -> float:
+    return float(num_str.replace(",", "").strip())
+
+
+_OP_PATTERN = r"(above|over|more than|greater than|higher than|below|under|less than|fewer than|lower than|at least|at most|min|max|up to|>=|<=|>|<|&gt;=|&lt;=|&gt;|&lt;)"
+_NUM_PATTERN = r"((?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?)"
+_FOLLOWER_UNITS = r"(k|m|mil|million|thousand|b|bil|billion)?"
 
 
 def parse_query(prompt: str) -> ParsedQuery:
@@ -108,8 +118,10 @@ def parse_query(prompt: str) -> ParsedQuery:
     # ---------------------------------------------------------
     # Pattern A: between X and Y followers OR followers between X and Y
     between_followers = re.search(
-        r"(?:(?:between|from)\s*(\d+(?:\.\d+)?)\s*(k|m|million|thousand|b|billion)?\s*(?:and|to)\s*(\d+(?:\.\d+)?)\s*(k|m|million|thousand|b|billion)?\s*followers?|"
-        r"followers?\s*(?:between|from)\s*(\d+(?:\.\d+)?)\s*(k|m|million|thousand|b|billion)?\s*(?:and|to)\s*(\d+(?:\.\d+)?)\s*(k|m|million|thousand|b|billion)?)",
+        r"(?:(?:between|from)\s*"
+        rf"{_NUM_PATTERN}\s*{_FOLLOWER_UNITS}\s*(?:and|to)\s*{_NUM_PATTERN}\s*{_FOLLOWER_UNITS}\s*followers?|"
+        r"followers?\s*(?:between|from)\s*"
+        rf"{_NUM_PATTERN}\s*{_FOLLOWER_UNITS}\s*(?:and|to)\s*{_NUM_PATTERN}\s*{_FOLLOWER_UNITS})",
         text_lower
     )
     if between_followers:
@@ -117,33 +129,36 @@ def parse_query(prompt: str) -> ParsedQuery:
             n1, u1, n2, u2 = between_followers.group(1), between_followers.group(2), between_followers.group(3), between_followers.group(4)
         else:
             n1, u1, n2, u2 = between_followers.group(5), between_followers.group(6), between_followers.group(7), between_followers.group(8)
-        v1 = float(n1) * _parse_multiplier(u1 or u2)
-        v2 = float(n2) * _parse_multiplier(u2)
+        v1 = _parse_num(n1) * _parse_multiplier(u1 or u2)
+        v2 = _parse_num(n2) * _parse_multiplier(u2)
         filters["total_followers"] = {"operator": "between", "min": min(v1, v2), "max": max(v1, v2)}
     else:
         # Pattern B: (op) (num) (unit) followers
         f_match = re.search(
-            r"(above|over|more than|greater than|higher than|below|under|less than|fewer than|lower than|at least|at most|min|max|up to|>=|<=|>|<)\s*"
-            r"(\d+(?:\.\d+)?)\s*(k|m|million|thousand|b|billion)?\s*followers?",
+            rf"{_OP_PATTERN}\s*"
+            rf"{_NUM_PATTERN}\s*{_FOLLOWER_UNITS}\s*followers?",
             text_lower
         )
         # Pattern C: followers (op) (num) (unit)
         f_inv = re.search(
-            r"followers?\s*(above|over|more than|greater than|higher than|below|under|less than|fewer than|lower than|at least|at most|min|max|up to|>=|<=|>|<)\s*"
-            r"(\d+(?:\.\d+)?)\s*(k|m|million|thousand|b|billion)?",
+            rf"followers?\s*{_OP_PATTERN}\s*"
+            rf"{_NUM_PATTERN}\s*{_FOLLOWER_UNITS}",
             text_lower
         )
         # Pattern D: (num)(unit)+ followers
-        f_plus = re.search(r"(\d+(?:\.\d+)?)\s*(k|m|million|thousand|b|billion)\s*(\+)?\s*followers?", text_lower)
+        f_plus = re.search(
+            rf"{_NUM_PATTERN}\s*(k|m|mil|million|thousand|b|bil|billion)\s*(\+)?\s*followers?",
+            text_lower
+        )
 
         if f_match:
-            val = float(f_match.group(2)) * _parse_multiplier(f_match.group(3))
+            val = _parse_num(f_match.group(2)) * _parse_multiplier(f_match.group(3))
             filters["total_followers"] = {"operator": _parse_op(f_match.group(1)), "value": val}
         elif f_inv:
-            val = float(f_inv.group(2)) * _parse_multiplier(f_inv.group(3))
+            val = _parse_num(f_inv.group(2)) * _parse_multiplier(f_inv.group(3))
             filters["total_followers"] = {"operator": _parse_op(f_inv.group(1)), "value": val}
         elif f_plus:
-            val = float(f_plus.group(1)) * _parse_multiplier(f_plus.group(2))
+            val = _parse_num(f_plus.group(1)) * _parse_multiplier(f_plus.group(2))
             filters["total_followers"] = {"operator": ">=", "value": val}
 
     # ---------------------------------------------------------
@@ -162,15 +177,15 @@ def parse_query(prompt: str) -> ParsedQuery:
         filters["engagement_rate"] = {"operator": "between", "min": min(v1, v2), "max": max(v1, v2)}
     else:
         eng_match = re.search(
-            r"(?:engagement|engagement rate|\ber\b)\s*(above|over|more than|greater than|higher than|below|under|less than|fewer than|lower than|at least|at most|min|max|up to|>=|<=|>|<)\s*(\d+(?:\.\d+)?)\s*%",
+            rf"(?:engagement|engagement rate|\ber\b)\s*{_OP_PATTERN}\s*(\d+(?:\.\d+)?)\s*%",
             text_lower
         )
         eng_inv = re.search(
-            r"(above|over|more than|greater than|higher than|below|under|less than|fewer than|lower than|at least|at most|min|max|up to|>=|<=|>|<)\s*(\d+(?:\.\d+)?)\s*%\s*(?:engagement|engagement rate|\ber\b)",
+            rf"{_OP_PATTERN}\s*(\d+(?:\.\d+)?)\s*%\s*(?:engagement|engagement rate|\ber\b)",
             text_lower
         )
         eng_dec = re.search(
-            r"(?:engagement|engagement rate|\ber\b)\s*(above|over|more than|greater than|higher than|below|under|less than|fewer than|lower than|at least|at most|min|max|up to|>=|<=|>|<)\s*(0\.\d+)",
+            rf"(?:engagement|engagement rate|\ber\b)\s*{_OP_PATTERN}\s*(0\.\d+)",
             text_lower
         )
 
@@ -185,12 +200,19 @@ def parse_query(prompt: str) -> ParsedQuery:
     # 3. PER-MEDIA REACH & METRICS NUMERIC FILTER
     # ---------------------------------------------------------
     reach_match = re.search(
-        r"\breach\s*(above|over|more than|greater than|higher than|below|under|less than|fewer than|lower than|at least|at most|min|max|up to|>=|<=|>|<)\s*(\d+(?:\.\d+)?)\s*(k|m|million|thousand|b|billion)?",
+        rf"\breach\s*{_OP_PATTERN}\s*{_NUM_PATTERN}\s*{_FOLLOWER_UNITS}",
+        text_lower
+    )
+    reach_inv = re.search(
+        rf"{_OP_PATTERN}\s*{_NUM_PATTERN}\s*{_FOLLOWER_UNITS}\s*reach\b",
         text_lower
     )
     if reach_match:
-        val = float(reach_match.group(2)) * _parse_multiplier(reach_match.group(3))
+        val = _parse_num(reach_match.group(2)) * _parse_multiplier(reach_match.group(3))
         filters["per_media_reach"] = {"operator": _parse_op(reach_match.group(1)), "value": val}
+    elif reach_inv:
+        val = _parse_num(reach_inv.group(2)) * _parse_multiplier(reach_inv.group(3))
+        filters["per_media_reach"] = {"operator": _parse_op(reach_inv.group(1)), "value": val}
 
     # ---------------------------------------------------------
     # 4. MEDIA TYPE
@@ -221,22 +243,62 @@ def parse_query(prompt: str) -> ParsedQuery:
             break
 
     # ---------------------------------------------------------
-    # 7. SPECIFIC HANDLE / USERNAME (Fixed: Word boundary & clean prefix)
+    # 7. SPECIFIC HANDLE / USERNAME (NLP-01: Robust handle extraction)
     # ---------------------------------------------------------
-    user_match = re.search(
-        r"(?:^|\s)(?:for|account\s+of|user|influencer|creator|handle)\s+@?([a-zA-Z0-9_\.]{3,30})|@([a-zA-Z0-9_\.]{3,30})",
-        text_lower
+    explicit_at_match = re.search(r"@([a-zA-Z0-9_\.]{3,30})\b", text_lower)
+
+    prefix_pattern = (
+        r"\b(?:"
+        r"(?:account|handle|profile)\s+of|"
+        r"(?:creator|user|influencer|profile|account)\s+named|"
+        r"handle\s*[:\s]|"
+        r"for\s+(?:account|handle|profile|creator|user|influencer)\s+(?:named\s+|of\s+)?"
+        r")\s*@?([a-zA-Z0-9_\.]{3,30})\b"
     )
-    if user_match:
-        candidate = user_match.group(1) or user_match.group(2)
+    prefix_match = re.search(prefix_pattern, text_lower)
+
+    candidate: Optional[str] = None
+    is_explicit = False
+
+    if explicit_at_match:
+        candidate = explicit_at_match.group(1)
+        is_explicit = True
+    elif prefix_match:
+        candidate = prefix_match.group(1)
+        is_explicit = False
+
+    if candidate:
+        candidate = candidate.rstrip(".!?,;:")
         reserved = [
             "accounts", "followers", "reach", "impressions", "reels", "carousels",
             "sports", "music", "fashion", "fitness", "finance", "spain", "india",
-            "brazil", "america", "reels", "stories", "photos", "posts", "influencers",
+            "brazil", "america", "stories", "photos", "posts", "influencers",
             "creators"
         ]
-        if candidate and candidate not in reserved and candidate not in CATEGORY_SYNONYMS and candidate not in COUNTRY_LOOKUP:
-            filters["username"] = candidate
+        common_nouns = {
+            "marketing", "summer", "new", "business", "tech", "technology", "product",
+            "campaign", "campaigns", "festival", "festivals", "brand", "brands",
+            "content", "post", "posts", "account", "accounts", "creator", "creators",
+            "user", "users", "influencer", "influencers", "profile", "profiles",
+            "video", "videos", "image", "images", "photo", "photos", "reel", "reels",
+            "story", "stories", "carousel", "carousels", "followers", "reach",
+            "impression", "impressions", "engagement", "virality", "analytics",
+            "prediction", "forecast", "data", "stats", "statistics", "report"
+        }
+
+        if is_explicit:
+            if candidate not in reserved and len(candidate) >= 3:
+                filters["username"] = candidate
+        else:
+            if (
+                candidate not in reserved
+                and candidate not in common_nouns
+                and candidate not in CATEGORY_SYNONYMS
+                and candidate not in COUNTRY_LOOKUP
+                and candidate not in MEDIA_TYPE_SYNONYMS
+                and len(candidate) >= 3
+            ):
+                filters["username"] = candidate
 
     # ---------------------------------------------------------
     # 8. TOP-N & RANKINGS (Word-boundary safe)

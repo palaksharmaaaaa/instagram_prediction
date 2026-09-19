@@ -1,3 +1,16 @@
+"""
+Legacy Training Module (v1 Prototype Architecture)
+==================================================
+DEPRECATION NOTICE:
+This module represents the v1 prototype training workflow and is maintained solely for
+backward compatibility.
+
+Production systems should use the enterprise-grade `instagram_predictor` package:
+- Model Training & Conformal Calibration: `instagram_predictor.models.trainer` (`train_production_models`)
+- Hyperparameter Optimization: `instagram_predictor.models.hpo` (`run_bayesian_hpo`)
+- Registry Management: `instagram_predictor.models.registry`
+"""
+
 import os
 import joblib
 import numpy as np
@@ -10,8 +23,12 @@ from sklearn.model_selection import KFold, cross_val_score, train_test_split
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import OneHotEncoder
 
-from preprocessing import load_data
-from synthetic_targets import create_synthetic_targets
+try:
+    from preprocessing import load_data
+    from synthetic_targets import create_synthetic_targets
+except ModuleNotFoundError:
+    from src.preprocessing import load_data
+    from src.synthetic_targets import create_synthetic_targets
 
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DATA_PATH = os.path.join(BASE_DIR, "data", "top_200_instagrammers.csv")

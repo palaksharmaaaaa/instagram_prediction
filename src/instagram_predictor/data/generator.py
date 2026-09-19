@@ -31,6 +31,14 @@ COUNTRIES = ["US", "IN", "BR", "GB", "ES", "CA", "FR", "AU", "DE", "IT", "MX", "
 AGE_GROUPS = ["18-24", "25-34", "35-44", "45+"]
 
 
+FOLLOWER_TIERS = [
+    ("nano", 500, 9_999),
+    ("micro", 10_000, 99_999),
+    ("macro", 100_000, 999_999),
+    ("mega", 1_000_000, 80_000_000),
+]
+
+
 def generate_enterprise_dataset(
     num_profiles: int = 250,
     posts_per_profile: int = 3,
@@ -66,35 +74,36 @@ def generate_enterprise_dataset(
         if i < len(usernames_seed):
             u, fn, cat, country, followers, following, posts, verified = usernames_seed[i]
         else:
-            cat = rng.choice(CATEGORIES)
-            country = rng.choice(COUNTRIES)
+            cat = str(rng.choice(CATEGORIES))
+            country = str(rng.choice(COUNTRIES))
             u = f"creator_{cat[:4].lower()}_{i}"
             fn = f"Creator {i} ({cat})"
-            # Log-normal follower distribution (micro, mid, macro, celebrity)
-            followers = int(np.exp(rng.uniform(np.log(10_000), np.log(80_000_000))))
+            # Stratified follower distribution across 4 creator tiers
+            tier_name, tier_min, tier_max = FOLLOWER_TIERS[(i - len(usernames_seed)) % len(FOLLOWER_TIERS)]
+            followers = int(np.clip(np.exp(rng.uniform(np.log(tier_min), np.log(tier_max))), tier_min, tier_max))
             following = int(rng.integers(50, 4000))
             posts = int(rng.integers(100, 5000))
             verified = bool(followers > 1_000_000 and rng.random() > 0.3)
 
-        profile_categories = set([cat])
+        profile_categories = set([str(cat)])
         profile_records = []
 
         for p_idx in range(posts_per_profile):
-            media_type = rng.choice(MEDIA_TYPES, p=[0.45, 0.30, 0.20, 0.05])
+            media_type = str(rng.choice(MEDIA_TYPES, p=[0.45, 0.30, 0.20, 0.05]))
             # 1. Single primary category for this media post
-            post_cat = cat if rng.random() > 0.30 else rng.choice(CATEGORIES)
+            post_cat = str(cat if rng.random() > 0.30 else rng.choice(CATEGORIES))
             profile_categories.add(post_cat)
 
             # 2. Multi-label content styles / categorizations for this media post (1 to 3 styles)
             num_styles = int(rng.choice([1, 2, 3], p=[0.45, 0.40, 0.15]))
-            post_styles = list(rng.choice(CONTENT_STYLES, size=num_styles, replace=False))
+            post_styles = [str(s) for s in rng.choice(CONTENT_STYLES, size=num_styles, replace=False)]
             style_str = ", ".join(post_styles)
 
-            age_group = rng.choice(AGE_GROUPS, p=[0.35, 0.40, 0.18, 0.07])
+            age_group = str(rng.choice(AGE_GROUPS, p=[0.35, 0.40, 0.18, 0.07]))
             female_pct = float(np.clip(rng.normal(0.52, 0.15), 0.10, 0.90))
 
             # Base engagement rate modulated by follower tier (smaller accounts have higher % ER)
-            base_er = float(np.clip(0.045 - 0.003 * np.log10(max(followers, 1000)), 0.008, 0.10))
+            base_er = float(np.clip(0.045 - 0.003 * np.log10(max(followers, 100)), 0.008, 0.10))
 
             # Media type multiplier on Reach and Virality
             media_reach_mult = {
@@ -144,13 +153,13 @@ def generate_enterprise_dataset(
             slide_count = int(rng.integers(2, 11)) if media_type == "Carousel" else 1
 
             # Temporal & scheduling
-            day_of_week = rng.choice(["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"])
+            day_of_week = str(rng.choice(["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]))
             hour_of_day = int(rng.integers(0, 24))
             is_wknd = int(day_of_week in ["Saturday", "Sunday"])
             is_peak = int(hour_of_day in [11, 12, 13, 18, 19, 20, 21])
 
             # Audience demographics
-            sec_country = rng.choice([c for c in COUNTRIES if c != country])
+            sec_country = str(rng.choice([c for c in COUNTRIES if c != country]))
             audience_activity = round(float(rng.uniform(0.40, 0.98)), 3)
 
             # Algorithmic discovery breakdown
@@ -211,10 +220,10 @@ def generate_enterprise_dataset(
             })
 
         # Set profile-wide distinct categories on all records for this creator
-        distinct_cats = sorted(list(profile_categories))
+        distinct_cats = sorted([str(c) for c in profile_categories])
         distinct_cats_str = ", ".join(distinct_cats)
         for rec in profile_records:
-            rec["account_categories"] = distinct_cats
+            rec["account_categories"] = [str(c) for c in distinct_cats]
             rec["account_categories_str"] = distinct_cats_str
             records.append(rec)
 
@@ -232,7 +241,9 @@ def ensure_dataset_exists(force_recreate: bool = False) -> pd.DataFrame:
 
     if not csv_path.exists() or force_recreate:
         df = generate_enterprise_dataset()
-        df.to_csv(csv_path, index=False)
+        temp_path = csv_path.with_suffix(".tmp")
+        df.to_csv(temp_path, index=False)
+        os.replace(temp_path, csv_path)
         return df
 
     return pd.read_csv(csv_path)

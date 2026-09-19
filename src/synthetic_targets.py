@@ -1,3 +1,15 @@
+"""
+Legacy Synthetic Targets Module (v1 Prototype Architecture)
+===========================================================
+DEPRECATION NOTICE:
+This module represents the v1 prototype architecture and is maintained solely for
+backward compatibility with legacy training scripts and tests (e.g., tests/test_end_to_end.py).
+
+Production systems should use the enterprise-grade `instagram_predictor` package:
+- Synthetic Data Generation: `instagram_predictor.data.generator` (`generate_synthetic_posts`)
+- Target Formulations: See `generate_synthetic_posts` for modern 2026 reach and impressions modeling.
+"""
+
 import numpy as np
 import pandas as pd
 

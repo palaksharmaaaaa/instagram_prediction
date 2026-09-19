@@ -1,3 +1,16 @@
+"""
+Legacy Preprocessing Module (v1 Prototype Architecture)
+======================================================
+DEPRECATION NOTICE:
+This module represents the v1 prototype architecture and is maintained solely for
+backward compatibility with legacy scripts and tests (e.g., tests/test_end_to_end.py).
+
+Production systems should use the enterprise-grade `instagram_predictor` package:
+- Data Loading: `instagram_predictor.data.loader` (`load_dataset`)
+- Feature Engineering: `instagram_predictor.data.feature_engineering` (`compute_derived_metrics`)
+- Synthetic Data Generation: `instagram_predictor.data.generator` (`generate_synthetic_posts`)
+"""
+
 import os
 import pandas as pd
 import numpy as np

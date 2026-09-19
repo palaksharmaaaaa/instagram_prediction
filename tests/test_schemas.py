@@ -60,3 +60,32 @@ def test_demographics_bounds():
 def test_confidence_interval_schema():
     ci = ConfidenceInterval(lower=1000, point_estimate=1500, upper=2000, confidence_level=0.80)
     assert ci.lower <= ci.point_estimate <= ci.upper
+
+
+def test_demographics_gender_sum_validation():
+    # Sum must be approximately 1.0 within 0.05 tolerance
+    valid_demo = Demographics(gender_female_pct=0.52, gender_male_pct=0.48)
+    assert valid_demo.gender_female_pct == 0.52
+    assert valid_demo.gender_male_pct == 0.48
+
+    # Sum significantly deviating from 1.0 (e.g. 0.90 + 0.90 = 1.80) raises ValidationError
+    with pytest.raises(ValidationError) as exc_info:
+        Demographics(gender_female_pct=0.90, gender_male_pct=0.90)
+    assert "Demographics female and male percentages must sum to 1.0" in str(exc_info.value)
+
+    # Sum significantly less than 1.0 (e.g. 0.30 + 0.30 = 0.60) raises ValidationError
+    with pytest.raises(ValidationError) as exc_info2:
+        Demographics(gender_female_pct=0.30, gender_male_pct=0.30)
+    assert "Demographics female and male percentages must sum to 1.0" in str(exc_info2.value)
+
+
+def test_post_caption_length_platform_limit():
+    # Valid caption length up to 2200
+    post = PostInput(caption_length_chars=2200)
+    assert post.caption_length_chars == 2200
+
+    # Exceeding 2200 raises ValidationError
+    with pytest.raises(ValidationError) as exc_info:
+        PostInput(caption_length_chars=2201)
+    assert "less than or equal to 2200" in str(exc_info.value)
+

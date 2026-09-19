@@ -24,11 +24,15 @@ def predict_batch(
 
     if predict_reach:
         reach_model = get_reach_pipeline()
-        df["predicted_reach"] = np.maximum(np.round(reach_model.predict(X)).astype(int), 100)
+        raw_reach = reach_model.predict(X)
+        clean_reach = np.nan_to_num(raw_reach, nan=100.0, posinf=1e10, neginf=100.0)
+        df["predicted_reach"] = np.maximum(np.round(clean_reach).astype(int), 100)
 
     if predict_impressions:
         imp_model = get_impressions_pipeline()
-        df["predicted_impressions"] = np.maximum(np.round(imp_model.predict(X)).astype(int), 100)
+        raw_imp = imp_model.predict(X)
+        clean_imp = np.nan_to_num(raw_imp, nan=100.0, posinf=1e10, neginf=100.0)
+        df["predicted_impressions"] = np.maximum(np.round(clean_imp).astype(int), 100)
 
     # Invariant guardrail: reach cannot exceed impressions
     if predict_reach and predict_impressions:
@@ -69,9 +73,10 @@ def simulate_post_performance(
     reach_eval = meta.get("evaluation", {}).get("reach", {})
     imp_eval = meta.get("evaluation", {}).get("impressions", {})
 
-    q_key = "q80" if confidence_level <= 0.85 else "q90"
-    global_q_reach = reach_eval.get("conformal_quantile_80" if confidence_level <= 0.85 else "conformal_quantile_90", 0.35)
-    global_q_imp = imp_eval.get("conformal_quantile_80" if confidence_level <= 0.85 else "conformal_quantile_90", 0.35)
+    calibrated_level = 0.80 if confidence_level <= 0.85 else 0.90
+    q_key = "q80" if calibrated_level == 0.80 else "q90"
+    global_q_reach = reach_eval.get("conformal_quantile_80" if calibrated_level == 0.80 else "conformal_quantile_90", 0.35)
+    global_q_imp = imp_eval.get("conformal_quantile_80" if calibrated_level == 0.80 else "conformal_quantile_90", 0.35)
 
     tier_reach_meta = reach_eval.get("tier_conformal_quantiles", {}).get(follower_tier, {})
     tier_imp_meta = imp_eval.get("tier_conformal_quantiles", {}).get(follower_tier, {})
@@ -80,10 +85,112 @@ def simulate_post_performance(
     q_imp = tier_imp_meta.get(q_key, global_q_imp)
 
     # Baseline metrics based on creator scale
-    likes = post.metrics.likes if post.metrics else int(profile.total_followers * 0.025)
-    comments = post.metrics.comments if post.metrics else int(likes * 0.04)
-    shares = post.metrics.shares if post.metrics else int(likes * 0.05)
-    saves = post.metrics.saves if post.metrics else int(likes * 0.03)
+    if post.metrics:
+        likes = post.metrics.likes
+        comments = post.metrics.comments
+        shares = post.metrics.shares
+        saves = post.metrics.saves
+        video_views = post.metrics.video_views if post.metrics.video_views is not None else (int(likes * 5.0) if post.media_type.value == "Reel" else 0)
+        completion_rate = post.metrics.completion_rate if post.metrics.completion_rate is not None else (0.45 if post.media_type.value == "Reel" else 0.0)
+        reach_home_pct = post.metrics.reach_from_home_pct if post.metrics.reach_from_home_pct is not None else 0.55
+        reach_explore_pct = post.metrics.reach_from_explore_pct if post.metrics.reach_from_explore_pct is not None else (0.35 if post.media_type.value == "Reel" else 0.15)
+        reach_hashtags_pct = post.metrics.reach_from_hashtags_pct if post.metrics.reach_from_hashtags_pct is not None else 0.05
+    else:
+        # Dynamic baseline modulation for unpublished post (ML-01)
+        base_er = float(np.clip(0.045 - 0.003 * np.log10(max(followers, 100)), 0.015, 0.08))
+
+        media_type_val = post.media_type.value if hasattr(post.media_type, "value") else str(post.media_type)
+        if media_type_val == "Reel":
+            like_mult = 1.15
+            share_mult = 2.20
+            save_mult = 1.05
+            comment_mult = 1.10
+        elif media_type_val == "Carousel":
+            slide_bonus = 1.0 + 0.03 * min(max(post.carousel_slide_count, 1), 10)
+            like_mult = 1.05
+            share_mult = 1.15
+            save_mult = 2.40 * slide_bonus
+            comment_mult = 1.25
+        elif media_type_val == "Story":
+            like_mult = 0.70
+            share_mult = 0.50
+            save_mult = 0.40
+            comment_mult = 0.60
+        else:  # Static Image
+            like_mult = 0.95
+            share_mult = 0.80
+            save_mult = 0.90
+            comment_mult = 0.90
+
+        style_list = post.categorizations if post.categorizations else ([post.categorization] if post.categorization else [])
+        style_tokens = " ".join([s.value if hasattr(s, "value") else str(s) for s in style_list]).lower()
+
+        if "educational" in style_tokens:
+            save_mult *= 1.80
+            share_mult *= 1.25
+            comment_mult *= 1.10
+        if "entertaining" in style_tokens:
+            share_mult *= 1.45
+            like_mult *= 1.10
+        if "promotional" in style_tokens:
+            like_mult *= 0.85
+            share_mult *= 0.75
+            save_mult *= 0.80
+            comment_mult *= 0.85
+        if "behind the scenes" in style_tokens:
+            comment_mult *= 1.30
+            like_mult *= 1.05
+        if "inspirational" in style_tokens:
+            save_mult *= 1.25
+            share_mult *= 1.25
+
+        if post.has_call_to_action:
+            comment_mult *= 1.30
+            save_mult *= 1.25
+            like_mult *= 1.05
+
+        if 150 <= post.caption_length_chars <= 900:
+            caption_mult = 1.08
+        elif post.caption_length_chars > 900:
+            caption_mult = 1.12 if ("educational" in style_tokens or "inspirational" in style_tokens) else 1.03
+        else:
+            caption_mult = 0.95
+
+        if 3 <= post.hashtags_count <= 15:
+            hashtag_mult = 1.10
+        elif post.hashtags_count == 0:
+            hashtag_mult = 0.90
+        elif post.hashtags_count > 20:
+            hashtag_mult = 0.95
+        else:
+            hashtag_mult = 1.02
+
+        is_peak = post.posted_hour_of_day in [11, 12, 13, 18, 19, 20, 21]
+        is_wknd = post.posted_day_of_week in ["Saturday", "Sunday"]
+
+        if is_peak:
+            like_mult *= 1.15
+            comment_mult *= 1.10
+        if is_wknd:
+            share_mult *= 1.15
+            like_mult *= 1.05
+
+        likes = max(int(followers * base_er * like_mult * caption_mult * hashtag_mult), 10)
+        comments = max(int(likes * 0.04 * comment_mult), 1)
+        shares = max(int(likes * 0.05 * share_mult), 1)
+        saves = max(int(likes * 0.03 * save_mult), 1)
+
+        if media_type_val == "Reel":
+            video_views = max(int(likes * 5.5), 10)
+            completion_rate = float(np.clip(0.65 - 0.003 * post.video_duration_seconds, 0.25, 0.85))
+            reach_explore_pct = float(np.clip(0.35 + 0.15 * (shares / (likes + 1.0)), 0.20, 0.70))
+        else:
+            video_views = 0
+            completion_rate = 0.0
+            reach_explore_pct = float(np.clip(0.15 + 0.10 * (shares / (likes + 1.0)), 0.05, 0.40))
+
+        reach_hashtags_pct = float(np.clip(0.02 + 0.005 * min(post.hashtags_count, 20), 0.01, 0.18))
+        reach_home_pct = float(max(0.10, 1.0 - (reach_explore_pct + reach_hashtags_pct + 0.05)))
 
     is_reel = float(post.media_type.value == "Reel")
     is_carousel = float(post.media_type.value == "Carousel")
@@ -109,7 +216,7 @@ def simulate_post_performance(
     else:
         uncertainty_rating = "✅ Calibrated (In-Distribution, High Confidence)"
 
-    coverage_label = f"{int(confidence_level * 100)}% Mondrian Conformal Coverage"
+    coverage_label = f"{int(calibrated_level * 100)}% Mondrian Conformal Coverage"
 
     row = {
         "username": profile.username,
@@ -133,6 +240,8 @@ def simulate_post_performance(
         "carousel_slide_count": post.carousel_slide_count,
         "posted_day_of_week": post.posted_day_of_week,
         "posted_hour_of_day": post.posted_hour_of_day,
+        "is_weekend": 1.0 if post.posted_day_of_week in ["Saturday", "Sunday"] else 0.0,
+        "is_peak_posting_hour": 1.0 if post.posted_hour_of_day in [11, 12, 13, 18, 19, 20, 21] else 0.0,
         "top_country": post.demographics.top_country,
         "secondary_country": post.demographics.secondary_country,
         "primary_age_group": post.demographics.primary_age_group,
@@ -143,19 +252,24 @@ def simulate_post_performance(
         "per_media_comments": comments,
         "per_media_shares": shares,
         "per_media_saves": saves,
-        "per_media_video_views": post.metrics.video_views if post.metrics and post.metrics.video_views else (int(likes * 5.0) if post.media_type.value == "Reel" else 0),
-        "per_media_completion_rate": post.metrics.completion_rate if post.metrics and post.metrics.completion_rate else (0.45 if post.media_type.value == "Reel" else 0.0),
-        "reach_from_home_pct": post.metrics.reach_from_home_pct if post.metrics and post.metrics.reach_from_home_pct else 0.55,
-        "reach_from_explore_pct": post.metrics.reach_from_explore_pct if post.metrics and post.metrics.reach_from_explore_pct else (0.35 if post.media_type.value == "Reel" else 0.15),
-        "reach_from_hashtags_pct": post.metrics.reach_from_hashtags_pct if post.metrics and post.metrics.reach_from_hashtags_pct else 0.05,
+        "per_media_video_views": video_views,
+        "per_media_completion_rate": completion_rate,
+        "reach_from_home_pct": reach_home_pct,
+        "reach_from_explore_pct": reach_explore_pct,
+        "reach_from_hashtags_pct": reach_hashtags_pct,
     }
 
     df_single = compute_derived_metrics(pd.DataFrame([row]))
     X_single = df_single[ALL_FEATURE_COLUMNS]
 
     # Model point estimates (transformed pipeline outputs in original scale)
-    point_reach = max(int(np.round(reach_pipeline.predict(X_single)[0])), 100)
-    point_imp = max(int(np.round(imp_pipeline.predict(X_single)[0])), point_reach)
+    raw_point_reach = reach_pipeline.predict(X_single)[0]
+    clean_point_reach = float(np.nan_to_num(raw_point_reach, nan=100.0, posinf=1e10, neginf=100.0))
+    point_reach = max(int(np.round(clean_point_reach)), 100)
+
+    raw_point_imp = imp_pipeline.predict(X_single)[0]
+    clean_point_imp = float(np.nan_to_num(raw_point_imp, nan=100.0, posinf=1e10, neginf=100.0))
+    point_imp = max(int(np.round(clean_point_imp)), point_reach)
 
     # Invariant check
     point_imp = max(point_imp, point_reach)
@@ -163,25 +277,31 @@ def simulate_post_performance(
     # Conformal calibrated prediction intervals:
     # [exp(log(1 + y) - q) - 1,  exp(log(1 + y) + q) - 1]
     log_reach = np.log1p(point_reach)
-    reach_lower = max(int(np.expm1(log_reach - q_reach)), 50)
-    reach_upper = int(np.expm1(log_reach + q_reach))
+    log_reach_lower = np.clip(log_reach - q_reach, 0.0, 30.0)
+    log_reach_upper = np.clip(log_reach + q_reach, 0.0, 30.0)
+    reach_lower = max(int(np.expm1(log_reach_lower)), 50)
+    reach_upper = max(int(np.expm1(log_reach_upper)), reach_lower)
 
     log_imp = np.log1p(point_imp)
-    imp_lower = max(int(np.expm1(log_imp - q_imp)), reach_lower)
-    imp_upper = max(int(np.expm1(log_imp + q_imp)), reach_upper)
+    log_imp_lower = np.clip(log_imp - q_imp, 0.0, 30.0)
+    log_imp_upper = np.clip(log_imp + q_imp, 0.0, 30.0)
+    imp_lower = max(int(np.expm1(log_imp_lower)), reach_lower)
+    imp_upper = max(int(np.expm1(log_imp_upper)), max(reach_upper, imp_lower))
 
     reach_ci = ConfidenceInterval(
         lower=reach_lower,
         point_estimate=point_reach,
         upper=reach_upper,
-        confidence_level=confidence_level
+        confidence_level=calibrated_level,
+        level=coverage_label
     )
 
     imp_ci = ConfidenceInterval(
         lower=imp_lower,
         point_estimate=point_imp,
         upper=imp_upper,
-        confidence_level=confidence_level
+        confidence_level=calibrated_level,
+        level=coverage_label
     )
 
     # Derived rates

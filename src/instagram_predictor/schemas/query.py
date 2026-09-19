@@ -39,3 +39,33 @@ class ParsedQuery(BaseModel):
     safety_flags: List[str] = Field(default_factory=list)
     intent: Optional[QueryIntent] = None
     audit_report: Optional[AuditReport] = None
+
+    @property
+    def username(self) -> Optional[str]:
+        return self.filters.get("username")
+
+    @property
+    def min_followers(self) -> Optional[float]:
+        tf = self.filters.get("total_followers")
+        if not tf or not isinstance(tf, dict):
+            return None
+        if tf.get("operator") == "between":
+            v = tf.get("min")
+            return int(v) if v is not None and isinstance(v, (int, float)) and float(v).is_integer() else v
+        if tf.get("operator") in (">", ">="):
+            v = tf.get("value")
+            return int(v) if v is not None and isinstance(v, (int, float)) and float(v).is_integer() else v
+        return None
+
+    @property
+    def max_followers(self) -> Optional[float]:
+        tf = self.filters.get("total_followers")
+        if not tf or not isinstance(tf, dict):
+            return None
+        if tf.get("operator") == "between":
+            v = tf.get("max")
+            return int(v) if v is not None and isinstance(v, (int, float)) and float(v).is_integer() else v
+        if tf.get("operator") in ("<", "<="):
+            v = tf.get("value")
+            return int(v) if v is not None and isinstance(v, (int, float)) and float(v).is_integer() else v
+        return None

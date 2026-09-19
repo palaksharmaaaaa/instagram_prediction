@@ -1,3 +1,16 @@
+"""
+Legacy Prompt Parser Module (v1 Prototype Architecture)
+======================================================
+DEPRECATION NOTICE:
+This module represents the v1 prototype architecture and is maintained solely for
+backward compatibility with legacy scripts and tests (e.g., tests/test_end_to_end.py).
+
+Production systems should use the enterprise-grade `instagram_predictor` package:
+- Query Parsing & NLU: `instagram_predictor.nlp.parser` (`parse_query`)
+- Intent Analysis: `instagram_predictor.nlp.intent_analyzer` (`analyze_query_intent`)
+- Input Sanitization: `instagram_predictor.guardrails.safety` (`sanitize_prompt`)
+"""
+
 import re
 
 COUNTRY_MAP = {

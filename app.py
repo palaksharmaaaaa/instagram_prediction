@@ -12,11 +12,30 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "src
 from instagram_predictor.config import settings
 from instagram_predictor.data import load_dataset
 from instagram_predictor.services import run_analytics_pipeline, run_post_simulation
-from instagram_predictor.models import get_model_metadata
+from instagram_predictor.models import get_model_metadata, get_reach_pipeline, get_impressions_pipeline
+from instagram_predictor.guardrails import sanitize_dataframe_for_csv
 from instagram_predictor.utils import format_number, format_percentage
 from instagram_predictor.schemas import (
     MediaType, ContentCategory, ContentStyle, Demographics, PostMetrics, ProfileInput, PostInput
 )
+
+
+@st.cache_data
+def get_cached_dataset() -> pd.DataFrame:
+    """Caches the full feature-engineered dataset across user interactions."""
+    return load_dataset()
+
+
+@st.cache_resource
+def get_cached_pipelines():
+    """Caches the trained ML pipelines across Streamlit reruns and sessions."""
+    return get_reach_pipeline(), get_impressions_pipeline()
+
+
+@st.cache_data
+def get_cached_metadata():
+    """Caches model metadata and performance metrics."""
+    return get_model_metadata()
 
 st.set_page_config(
     page_title="Instagram AI Prediction & Analytics Engine",
@@ -75,7 +94,8 @@ with tabs[0]:
         else:
             try:
                 with st.spinner("Processing NLP query & applying guardrails..."):
-                    parsed_query, results_df = run_analytics_pipeline(user_prompt)
+                    get_cached_pipelines()
+                    parsed_query, results_df = run_analytics_pipeline(user_prompt, df=get_cached_dataset())
 
                 # Query Specifications & NLP Auditor Card
                 with st.expander("🔍 NLP Query Auditor & Strategic Intent Analysis", expanded=True):
@@ -175,7 +195,8 @@ with tabs[0]:
 
                     st.dataframe(table_df, column_config=col_configs, width="stretch", hide_index=True)
 
-                    csv_bytes = table_df.to_csv(index=False).encode("utf-8")
+                    sanitized_csv_df = sanitize_dataframe_for_csv(table_df)
+                    csv_bytes = sanitized_csv_df.to_csv(index=False).encode("utf-8")
                     st.download_button("📥 Export Results to CSV", csv_bytes, "instagram_analytics_results.csv", "text/csv")
 
             except Exception as e:
@@ -188,7 +209,7 @@ with tabs[1]:
     st.subheader("🎯 What-If Post Performance Simulator")
     st.markdown("Forecast projected Reach, Impressions, Engagement, and Virality **before publishing a post**.")
 
-    raw_df = load_dataset()
+    raw_df = get_cached_dataset()
     unique_creators = sorted(raw_df["username"].unique().tolist())
 
     sim_col1, sim_col2 = st.columns([1, 1])
@@ -263,6 +284,7 @@ with tabs[1]:
     simulate_btn = st.button("🚀 Run Post Performance Forecast", type="primary", width="stretch")
 
     if simulate_btn:
+        get_cached_pipelines()
         profile_dict = {
             "username": "simulated_creator",
             "full_name": "Simulated Creator",
@@ -291,7 +313,8 @@ with tabs[1]:
             "demographics": {
                 "top_country": demo_country,
                 "primary_age_group": demo_age,
-                "gender_female_pct": demo_female
+                "gender_female_pct": demo_female,
+                "gender_male_pct": round(1.0 - demo_female, 4)
             }
         }
 
@@ -381,7 +404,7 @@ with tabs[2]:
     st.subheader("📊 Industry Benchmarks & Demographic Insights")
     st.markdown("Explore cross-category performance distributions and engagement drivers across the dataset.")
 
-    df_bench = load_dataset()
+    df_bench = get_cached_dataset()
 
     b_col1, b_col2 = st.columns(2)
     with b_col1:
@@ -448,7 +471,8 @@ with tabs[3]:
     st.subheader("🛡️ Engine Guardrails, Safety Rules & Model Metadata")
     st.markdown("Review system architecture, active platform guardrails, and model validation metrics.")
 
-    meta = get_model_metadata()
+    meta = get_cached_metadata()
+    get_cached_pipelines()
 
     g_col1, g_col2 = st.columns(2)
 

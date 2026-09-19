@@ -82,7 +82,11 @@ def run_bayesian_hpo(
                 )
                 model.fit(X_tr, y_tr)
                 preds = model.predict(X_val)
-                fold_maes.append(mean_absolute_error(y_val, preds))
+                loss = mean_absolute_error(
+                    np.log1p(np.maximum(y_val, 0)),
+                    np.log1p(np.maximum(preds, 0))
+                )
+                fold_maes.append(loss)
 
             return float(np.mean(fold_maes))
 
@@ -93,7 +97,7 @@ def run_bayesian_hpo(
         study.optimize(objective, n_trials=n_trials)
         best_params = study.best_params
         best_score = study.best_value
-        logger.info(f"Optuna HPO Complete for {target_column}. Best CV MAE: {best_score:,.2f}")
+        logger.info(f"Optuna HPO Complete for {target_column}. Best CV Log-Scale MAE: {best_score:,.4f}")
         return {"best_params": best_params, "best_cv_mae": best_score, "method": "Optuna TPE"}
 
     except ImportError:
@@ -129,14 +133,18 @@ def run_bayesian_hpo(
                 )
                 model.fit(X_tr, y_tr)
                 preds = model.predict(X_val)
-                fold_maes.append(mean_absolute_error(y_val, preds))
+                loss = mean_absolute_error(
+                    np.log1p(np.maximum(y_val, 0)),
+                    np.log1p(np.maximum(preds, 0))
+                )
+                fold_maes.append(loss)
 
             mean_mae = float(np.mean(fold_maes))
             if mean_mae < best_score:
                 best_score = mean_mae
                 best_params = p
 
-        logger.info(f"Grid HPO Complete for {target_column}. Best CV MAE: {best_score:,.2f}")
+        logger.info(f"Grid HPO Complete for {target_column}. Best CV Log-Scale MAE: {best_score:,.4f}")
         return {"best_params": best_params, "best_cv_mae": best_score, "method": "Deterministic GroupKFold Search"}
 
 

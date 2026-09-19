@@ -48,7 +48,7 @@ FEATURE_COLUMNS_NUMERIC = [
     "is_behind_scenes",
     "is_inspirational",
     # Domain interaction features
-    "reach_potential",
+    "creator_scale_engagement",
     "virality_momentum",
     "save_efficiency",
     "interaction_density",
@@ -88,32 +88,33 @@ def compute_derived_metrics(df: pd.DataFrame) -> pd.DataFrame:
     Computes industry-standard Instagram analytics, log-scale metrics,
     and high-dimensional domain interaction features.
     """
+    if df.empty:
+        return df.copy()
+
     df = df.copy()
 
-    # Raw counts & defaults using robust series getters
-    followers = _get_numeric_series(df, "total_followers", 1.0).replace(0, 1.0)
-    following = _get_numeric_series(df, "total_following", 0.0)
-    posts = _get_numeric_series(df, "total_media_posts", 0.0)
-    acc_age = _get_numeric_series(df, "account_age_years", 3.0)
-    posting_freq = _get_numeric_series(df, "posting_frequency_per_week", 3.5)
+    # Raw counts & defaults using robust series getters with non-negative bounds
+    followers = _get_numeric_series(df, "total_followers", 1.0).clip(lower=1.0)
+    following = _get_numeric_series(df, "total_following", 0.0).clip(lower=0.0)
+    posts = _get_numeric_series(df, "total_media_posts", 0.0).clip(lower=0.0)
+    acc_age = _get_numeric_series(df, "account_age_years", 3.0).clip(lower=0.0)
+    posting_freq = _get_numeric_series(df, "posting_frequency_per_week", 3.5).clip(lower=0.0)
     growth_rate = _get_numeric_series(df, "follower_growth_rate_30d", 0.02)
 
-    likes = _get_numeric_series(df, "per_media_likes", 0.0)
-    comments = _get_numeric_series(df, "per_media_comments", 0.0)
-    shares = _get_numeric_series(df, "per_media_shares", 0.0)
-    saves = _get_numeric_series(df, "per_media_saves", 0.0)
-    video_views = _get_numeric_series(df, "per_media_video_views", 0.0)
-    completion_rate = _get_numeric_series(df, "per_media_completion_rate", 0.0)
+    likes = _get_numeric_series(df, "per_media_likes", 0.0).clip(lower=0.0)
+    comments = _get_numeric_series(df, "per_media_comments", 0.0).clip(lower=0.0)
+    shares = _get_numeric_series(df, "per_media_shares", 0.0).clip(lower=0.0)
+    saves = _get_numeric_series(df, "per_media_saves", 0.0).clip(lower=0.0)
+    video_views = _get_numeric_series(df, "per_media_video_views", 0.0).clip(lower=0.0)
+    completion_rate = _get_numeric_series(df, "per_media_completion_rate", 0.0).clip(lower=0.0, upper=1.0)
 
-    caption_len = _get_numeric_series(df, "caption_length_chars", 250.0)
-    hashtags = _get_numeric_series(df, "hashtags_count", 5.0)
-    mentions = _get_numeric_series(df, "mentions_count", 0.0)
+    caption_len = _get_numeric_series(df, "caption_length_chars", 250.0).clip(lower=0.0)
+    hashtags = _get_numeric_series(df, "hashtags_count", 5.0).clip(lower=0.0)
+    mentions = _get_numeric_series(df, "mentions_count", 0.0).clip(lower=0.0)
     has_cta = _get_numeric_series(df, "has_call_to_action", 1.0)
-    video_sec = _get_numeric_series(df, "video_duration_seconds", 0.0)
-    slide_count = _get_numeric_series(df, "carousel_slide_count", 1.0)
+    video_sec = _get_numeric_series(df, "video_duration_seconds", 0.0).clip(lower=0.0)
+    slide_count = _get_numeric_series(df, "carousel_slide_count", 1.0).clip(lower=1.0)
     hour_of_day = _get_numeric_series(df, "posted_hour_of_day", 18.0)
-    is_wknd = _get_numeric_series(df, "is_weekend", 0.0)
-    is_peak = _get_numeric_series(df, "is_peak_posting_hour", 1.0)
 
     female_pct = _get_numeric_series(df, "gender_female_pct", 0.50)
     male_pct = _get_numeric_series(df, "gender_male_pct", 1.0 - female_pct)
@@ -123,11 +124,18 @@ def compute_derived_metrics(df: pd.DataFrame) -> pd.DataFrame:
     hashtag_pct = _get_numeric_series(df, "reach_from_hashtags_pct", 0.05)
     home_pct = _get_numeric_series(df, "reach_from_home_pct", 0.60)
 
-    # Fill back into DataFrame
+    # Fill back into DataFrame (guaranteeing all base feature columns exist)
+    df["total_followers"] = followers
+    df["total_following"] = following
+    df["total_media_posts"] = posts
     df["account_age_years"] = acc_age
     df["posting_frequency_per_week"] = posting_freq
     df["follower_growth_rate_30d"] = growth_rate
     df["follower_following_ratio"] = followers / (following + 1.0)
+    df["per_media_likes"] = likes
+    df["per_media_comments"] = comments
+    df["per_media_shares"] = shares
+    df["per_media_saves"] = saves
     df["per_media_video_views"] = video_views
     df["per_media_completion_rate"] = completion_rate
     df["caption_length_chars"] = caption_len
@@ -137,8 +145,6 @@ def compute_derived_metrics(df: pd.DataFrame) -> pd.DataFrame:
     df["video_duration_seconds"] = video_sec
     df["carousel_slide_count"] = slide_count
     df["posted_hour_of_day"] = hour_of_day
-    df["is_weekend"] = is_wknd
-    df["is_peak_posting_hour"] = is_peak
     df["gender_female_pct"] = female_pct
     df["gender_male_pct"] = male_pct
     df["audience_activity_score"] = audience_activity
@@ -148,6 +154,8 @@ def compute_derived_metrics(df: pd.DataFrame) -> pd.DataFrame:
 
     df["secondary_country"] = _get_categorical_series(df, "secondary_country", "US")
     df["posted_day_of_week"] = _get_categorical_series(df, "posted_day_of_week", "Wednesday")
+    df["is_weekend"] = df["posted_day_of_week"].isin(["Saturday", "Sunday"]).astype(float)
+    df["is_peak_posting_hour"] = df["posted_hour_of_day"].round().astype(int).isin([11, 12, 13, 18, 19, 20, 21]).astype(float)
     df["media_type"] = _get_categorical_series(df, "media_type", "Reel")
     df["category"] = _get_categorical_series(df, "category", "Sports")
 
@@ -178,7 +186,7 @@ def compute_derived_metrics(df: pd.DataFrame) -> pd.DataFrame:
     df["log_posts"] = np.log1p(posts)
 
     # 3. Domain Interaction Terms
-    df["reach_potential"] = followers * (total_eng / followers)
+    df["creator_scale_engagement"] = np.log1p(followers) * (total_eng / (followers + 1.0))
     is_reel = (df.get("media_type", "").astype(str) == "Reel").astype(float)
     is_carousel = (df.get("media_type", "").astype(str) == "Carousel").astype(float)
 
