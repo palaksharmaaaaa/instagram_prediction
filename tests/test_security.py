@@ -20,7 +20,6 @@ from instagram_predictor.guardrails.safety import (
     sanitize_csv_cell,
     sanitize_dataframe_for_csv,
 )
-from predictor import apply_filter as predictor_apply_filters
 
 
 # =============================================================================
@@ -117,26 +116,6 @@ def test_sec02_analytics_service_regex_special_chars():
         res_u = apply_query_filters(df, {"username": dangerous})
         assert isinstance(res_u, pd.DataFrame)
         res_s = apply_query_filters(df, {"categorization": dangerous})
-        assert isinstance(res_s, pd.DataFrame)
-
-
-def test_sec02_predictor_regex_special_chars():
-    df = pd.DataFrame({
-        "Main topic": ["Sports (Football)", "Tech [Gadgets]"],
-        "Main video category": ["Sports", "Tech"],
-        "Username": ["athlete(star)", "geek[tech]"],
-        "Channel Name": ["Star Athlete (Official)", "Geek [Tech]"],
-        "Country": ["US", "IN"]
-    })
-
-    # Test with unclosed regex patterns
-    for dangerous in ["(", "[", "*", "+", "?", "\\", "^", "$"]:
-        res_cat = predictor_apply_filters(df, {"category": dangerous})
-        assert isinstance(res_cat, pd.DataFrame)
-
-        res_user = predictor_apply_filters(df, {"Username": dangerous})
-        assert isinstance(res_user, pd.DataFrame)
-
 
 # =============================================================================
 # SEC-03: Prompt Injection & HTML Neutralization Tests

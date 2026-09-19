@@ -19,6 +19,10 @@ class Settings(BaseModel):
     # Model Artifact Paths
     REACH_MODEL_PATH: Path = MODELS_DIR / "reach_pipeline.joblib"
     IMPRESSIONS_MODEL_PATH: Path = MODELS_DIR / "impressions_pipeline.joblib"
+    DIAGNOSTIC_REACH_MODEL_PATH: Path = REACH_MODEL_PATH
+    DIAGNOSTIC_IMPRESSIONS_MODEL_PATH: Path = IMPRESSIONS_MODEL_PATH
+    PRE_PUBLISH_REACH_MODEL_PATH: Path = MODELS_DIR / "pre_publish_reach_pipeline.joblib"
+    PRE_PUBLISH_IMPRESSIONS_MODEL_PATH: Path = MODELS_DIR / "pre_publish_impressions_pipeline.joblib"
     MODEL_METADATA_PATH: Path = MODELS_DIR / "model_metadata.json"
 
     # Instagram Platform Constraints & Guardrails

@@ -19,6 +19,8 @@ class SecurityError(Exception):
 _REGISTRY_CACHE: Dict[str, Any] = {
     "reach_pipeline": None,
     "impressions_pipeline": None,
+    "pre_publish_reach_pipeline": None,
+    "pre_publish_impressions_pipeline": None,
     "metadata": None
 }
 
@@ -30,6 +32,8 @@ def clear_registry_cache() -> None:
     with _REGISTRY_LOCK:
         _REGISTRY_CACHE["reach_pipeline"] = None
         _REGISTRY_CACHE["impressions_pipeline"] = None
+        _REGISTRY_CACHE["pre_publish_reach_pipeline"] = None
+        _REGISTRY_CACHE["pre_publish_impressions_pipeline"] = None
         _REGISTRY_CACHE["metadata"] = None
 
 
@@ -96,6 +100,40 @@ def verify_artifact_integrity(artifact_path: Path, artifact_key: Optional[str] =
     return True
 
 
+def get_pre_publish_reach_pipeline():
+    """
+    Loads and caches the Pre-Publishing Reach prediction pipeline after verifying artifact integrity.
+    Thread-safe implementation using double-checked locking.
+    """
+    if _REGISTRY_CACHE["pre_publish_reach_pipeline"] is None:
+        with _REGISTRY_LOCK:
+            if _REGISTRY_CACHE["pre_publish_reach_pipeline"] is None:
+                if not settings.PRE_PUBLISH_REACH_MODEL_PATH.exists():
+                    from .trainer import train_and_persist_pipelines
+                    logger.info("Pre-publishing reach pipeline not found. Triggering automated model training...")
+                    train_and_persist_pipelines()
+                verify_artifact_integrity(settings.PRE_PUBLISH_REACH_MODEL_PATH, "pre_publish_reach_pipeline")
+                _REGISTRY_CACHE["pre_publish_reach_pipeline"] = joblib.load(settings.PRE_PUBLISH_REACH_MODEL_PATH)
+    return _REGISTRY_CACHE["pre_publish_reach_pipeline"]
+
+
+def get_pre_publish_impressions_pipeline():
+    """
+    Loads and caches the Pre-Publishing Impressions prediction pipeline after verifying artifact integrity.
+    Thread-safe implementation using double-checked locking.
+    """
+    if _REGISTRY_CACHE["pre_publish_impressions_pipeline"] is None:
+        with _REGISTRY_LOCK:
+            if _REGISTRY_CACHE["pre_publish_impressions_pipeline"] is None:
+                if not settings.PRE_PUBLISH_IMPRESSIONS_MODEL_PATH.exists():
+                    from .trainer import train_and_persist_pipelines
+                    logger.info("Pre-publishing impressions pipeline not found. Triggering automated model training...")
+                    train_and_persist_pipelines()
+                verify_artifact_integrity(settings.PRE_PUBLISH_IMPRESSIONS_MODEL_PATH, "pre_publish_impressions_pipeline")
+                _REGISTRY_CACHE["pre_publish_impressions_pipeline"] = joblib.load(settings.PRE_PUBLISH_IMPRESSIONS_MODEL_PATH)
+    return _REGISTRY_CACHE["pre_publish_impressions_pipeline"]
+
+
 def get_reach_pipeline():
     """
     Loads and caches the Reach prediction pipeline after verifying artifact integrity.
@@ -128,6 +166,22 @@ def get_impressions_pipeline():
                 verify_artifact_integrity(settings.IMPRESSIONS_MODEL_PATH, "impressions_pipeline")
                 _REGISTRY_CACHE["impressions_pipeline"] = joblib.load(settings.IMPRESSIONS_MODEL_PATH)
     return _REGISTRY_CACHE["impressions_pipeline"]
+
+
+def get_diagnostic_reach_pipeline():
+    """
+    Loads and caches the Post-Publishing Diagnostic Reach prediction pipeline.
+    Thread-safe implementation using double-checked locking.
+    """
+    return get_reach_pipeline()
+
+
+def get_diagnostic_impressions_pipeline():
+    """
+    Loads and caches the Post-Publishing Diagnostic Impressions prediction pipeline.
+    Thread-safe implementation using double-checked locking.
+    """
+    return get_impressions_pipeline()
 
 
 def get_model_metadata() -> Dict[str, Any]:

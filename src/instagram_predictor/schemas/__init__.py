@@ -1,4 +1,5 @@
 from .profile import (
+    PlatformType,
     MediaType,
     ContentCategory,
     ContentStyle,
@@ -11,6 +12,7 @@ from .query import NumericFilter, TopNSpec, ParsedQuery
 from .prediction import ConfidenceInterval, SimulationPrediction, MetricCard
 
 __all__ = [
+    "PlatformType",
     "MediaType",
     "ContentCategory",
     "ContentStyle",

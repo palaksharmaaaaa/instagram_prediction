@@ -40,6 +40,12 @@ def apply_query_filters(df: pd.DataFrame, filters: Dict[str, Any]) -> pd.DataFra
             result = result[mask]
             continue
 
+        # Platform
+        if col == "platform":
+            p_query = str(cond).lower()
+            result = result[result["platform"].astype(str).str.lower() == p_query]
+            continue
+
         # Media Type
         if col == "media_type":
             m_query = str(cond).lower()

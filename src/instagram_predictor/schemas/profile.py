@@ -1,13 +1,44 @@
 from enum import Enum
 from typing import Optional, List, Any, Union
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import BaseModel, Field, field_validator, model_validator, ConfigDict
+
+
+class PlatformType(str, Enum):
+    INSTAGRAM = "Instagram"
+    YOUTUBE = "YouTube"
+    SNAPCHAT = "Snapchat"
 
 
 class MediaType(str, Enum):
+    # Instagram formats
     REEL = "Reel"
     CAROUSEL = "Carousel"
     STATIC_IMAGE = "Static Image"
     STORY = "Story"
+    VIDEO = "Video"
+    # YouTube formats
+    YOUTUBE_SHORT = "YouTube Short"
+    YOUTUBE_VIDEO = "YouTube Video"
+    COMMUNITY_POST = "Community Post"
+    # Snapchat formats
+    SNAPCHAT_SPOTLIGHT = "Snapchat Spotlight"
+    SNAPCHAT_STORY = "Snapchat Story"
+    SNAPCHAT_POST = "Snapchat Post"
+
+
+FORMAT_TO_PLATFORM = {
+    MediaType.REEL: PlatformType.INSTAGRAM,
+    MediaType.CAROUSEL: PlatformType.INSTAGRAM,
+    MediaType.STATIC_IMAGE: PlatformType.INSTAGRAM,
+    MediaType.STORY: PlatformType.INSTAGRAM,
+    MediaType.VIDEO: PlatformType.INSTAGRAM,
+    MediaType.YOUTUBE_SHORT: PlatformType.YOUTUBE,
+    MediaType.YOUTUBE_VIDEO: PlatformType.YOUTUBE,
+    MediaType.COMMUNITY_POST: PlatformType.YOUTUBE,
+    MediaType.SNAPCHAT_SPOTLIGHT: PlatformType.SNAPCHAT,
+    MediaType.SNAPCHAT_STORY: PlatformType.SNAPCHAT,
+    MediaType.SNAPCHAT_POST: PlatformType.SNAPCHAT,
+}
 
 
 class ContentCategory(str, Enum):
@@ -76,6 +107,9 @@ class PostMetrics(BaseModel):
 
 
 class ProfileInput(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
+    platform: PlatformType = Field(default=PlatformType.INSTAGRAM, description="Social media publishing platform")
     username: str = Field(min_length=1, max_length=50)
     full_name: str = Field(default="", max_length=100)
     country: str = Field(default="US")
@@ -89,6 +123,10 @@ class ProfileInput(BaseModel):
     is_verified: bool = Field(default=False)
     account_category: ContentCategory = Field(default=ContentCategory.MUSIC_ENTERTAINMENT, description="Primary profile topic category")
     account_categories: List[ContentCategory] = Field(default_factory=list, description="Array of distinct categories represented across creator posts")
+    profile_picture_url: Optional[str] = Field(default=None, description="Direct URL to creator profile picture")
+    biography: Optional[str] = Field(default=None, description="Creator profile bio text")
+    raw_following: Optional[int] = Field(default=None, description="Uncapped following count reported by platform")
+
 
     @field_validator("username")
     def clean_username(cls, v: str) -> str:
@@ -109,6 +147,9 @@ class ProfileInput(BaseModel):
 
 
 class PostInput(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
+    platform: PlatformType = Field(default=PlatformType.INSTAGRAM, description="Social media publishing platform")
     media_type: MediaType = Field(default=MediaType.REEL)
     category: ContentCategory = Field(default=ContentCategory.SPORTS, description="Single primary category for this media post")
     categorizations: List[ContentStyle] = Field(default_factory=list, description="Array of content style categorizations for this media post")
@@ -119,15 +160,50 @@ class PostInput(BaseModel):
     has_call_to_action: bool = Field(default=True, description="Whether post explicitly prompts save/share/comment")
     video_duration_seconds: float = Field(default=0.0, ge=0.0, description="Duration in seconds (for Reels/Videos)")
     carousel_slide_count: int = Field(default=1, ge=1, le=10, description="Number of slides (for Carousels)")
+    video_title_length: int = Field(default=60, ge=0, le=100, description="Title length for YouTube content")
+    thumbnail_has_face: bool = Field(default=True, description="Whether thumbnail features a human face for YouTube content")
+    screenshot_count: int = Field(default=0, ge=0, description="Audience screenshot count for Snapchat content")
     posted_day_of_week: str = Field(default="Wednesday", description="Day of the week published")
     posted_hour_of_day: int = Field(default=18, ge=0, le=23, description="Hour of the day published (0 to 23)")
     demographics: Demographics = Field(default_factory=Demographics)
     metrics: Optional[PostMetrics] = None
+    id: Optional[str] = Field(default=None, description="Platform media identifier")
+    permalink: Optional[str] = Field(default=None, description="Direct web link to the media post")
+    caption: Optional[str] = Field(default=None, description="Raw text caption of the media post")
+    timestamp: Optional[str] = Field(default=None, description="ISO timestamp of media publishing")
+
 
     @model_validator(mode="before")
     @classmethod
-    def sync_categorizations(cls, data: Any) -> Any:
+    def sync_platform_and_categorizations(cls, data: Any) -> Any:
         if isinstance(data, dict):
+            # 1. Platform auto-inference & validation
+            media_type_raw = data.get("media_type")
+            platform_raw = data.get("platform")
+
+            if media_type_raw is not None:
+                try:
+                    resolved_mt = MediaType(media_type_raw) if not isinstance(media_type_raw, MediaType) else media_type_raw
+                    expected_platform = FORMAT_TO_PLATFORM.get(resolved_mt)
+                    if expected_platform:
+                        if platform_raw is None:
+                            data["platform"] = expected_platform
+                        else:
+                            try:
+                                resolved_platform = PlatformType(platform_raw) if not isinstance(platform_raw, PlatformType) else platform_raw
+                                if resolved_platform != expected_platform:
+                                    raise ValueError(
+                                        f"Media format '{resolved_mt.value}' does not match specified platform '{resolved_platform.value}'"
+                                    )
+                            except ValueError as ve:
+                                if "does not match" in str(ve):
+                                    raise
+                                raise
+                except ValueError as ve:
+                    if "does not match" in str(ve):
+                        raise
+
+            # 2. Synchronize categorizations
             styles = data.get("categorizations")
             single = data.get("categorization")
             if styles and isinstance(styles, list) and len(styles) > 0:
@@ -139,6 +215,15 @@ class PostInput(BaseModel):
                 data["categorization"] = ContentStyle.ENTERTAINING
                 data["categorizations"] = [ContentStyle.ENTERTAINING]
         return data
+
+    @model_validator(mode="after")
+    def validate_platform_media_compatibility(self) -> "PostInput":
+        expected_platform = FORMAT_TO_PLATFORM.get(self.media_type)
+        if expected_platform and self.platform != expected_platform:
+            raise ValueError(
+                f"Media format '{self.media_type.value}' is not supported on platform '{self.platform.value}'"
+            )
+        return self
 
     @property
     def primary_categorization(self) -> ContentStyle:

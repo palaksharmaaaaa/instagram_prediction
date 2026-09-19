@@ -12,12 +12,19 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "src
 from instagram_predictor.config import settings
 from instagram_predictor.data import load_dataset
 from instagram_predictor.services import run_analytics_pipeline, run_post_simulation
-from instagram_predictor.models import get_model_metadata, get_reach_pipeline, get_impressions_pipeline
+from instagram_predictor.models import (
+    get_model_metadata,
+    get_reach_pipeline,
+    get_impressions_pipeline,
+    explain_post_prediction,
+)
 from instagram_predictor.guardrails import sanitize_dataframe_for_csv
 from instagram_predictor.utils import format_number, format_percentage
 from instagram_predictor.schemas import (
-    MediaType, ContentCategory, ContentStyle, Demographics, PostMetrics, ProfileInput, PostInput
+    PlatformType, MediaType, ContentCategory, ContentStyle, Demographics, PostMetrics, ProfileInput, PostInput
 )
+from instagram_predictor.integrations import InstagramGraphAPIClient, MetaGraphAPIError
+
 
 
 @st.cache_data
@@ -61,6 +68,203 @@ tabs = st.tabs([
 with tabs[0]:
     st.subheader("Natural Language Account & Media Search")
     st.markdown("Query profiles and media performance using natural language. The engine parses filters, checks safety guardrails, and triggers predictive models.")
+
+    # Live Meta Graph API Ingestion Connector Expander
+    with st.expander("🔗 Connect Live Instagram Account via Meta Graph API", expanded=False):
+        st.markdown(
+            "Connect an authentic **Instagram Creator or Business Account** to stream live profile statistics, "
+            "media insights, and audience demographics directly into the prediction engine."
+        )
+
+        st.info(
+            "🔑 **Required Meta Permissions:** Ensure your Meta User Access Token is granted: "
+            "`instagram_basic`, `instagram_manage_insights`, `pages_show_list`, and `pages_read_engagement`."
+        )
+
+        meta_tok_col, meta_btn_col = st.columns([4, 2])
+        with meta_tok_col:
+            meta_token_input = st.text_input(
+                "Meta User Access Token:",
+                type="password",
+                value=st.session_state.get("meta_user_token", ""),
+                placeholder="EAAB... (Paste User Token from Graph API Explorer)",
+                help="Requires a valid Meta Graph API User or System User Access Token.",
+            )
+            if meta_token_input:
+                st.session_state["meta_user_token"] = meta_token_input
+
+        with meta_btn_col:
+            st.write("")
+            st.write("")
+            discover_clicked = st.button("🔍 Auto-Discover from Pages", width="stretch")
+
+        # Optional Long-Lived Token Exchange sub-expander
+        with st.expander("🔄 Exchange for 60-Day Long-Lived Token (Optional)", expanded=False):
+            ex_col1, ex_col2, ex_col3 = st.columns([2, 2, 2])
+            with ex_col1:
+                app_id_val = st.text_input("Meta App ID:", placeholder="e.g. 123456789012345")
+            with ex_col2:
+                app_secret_val = st.text_input("Meta App Secret:", type="password", placeholder="e.g. 98a7b6c5...")
+            with ex_col3:
+                st.write("")
+                st.write("")
+                exchange_clicked = st.button("Generate Long-Lived Token", width="stretch")
+
+            if exchange_clicked:
+                if not meta_token_input:
+                    st.error("Please provide a short-lived user access token first.")
+                elif not app_id_val or not app_secret_val:
+                    st.error("Please enter both Meta App ID and App Secret.")
+                else:
+                    try:
+                        ex_client = InstagramGraphAPIClient(
+                            access_token=meta_token_input,
+                            app_id=app_id_val,
+                            app_secret=app_secret_val,
+                        )
+                        long_res = ex_client.exchange_for_long_lived_token()
+                        st.session_state["meta_user_token"] = long_res.get("access_token", meta_token_input)
+                        exp_days = round(long_res.get("expires_in", 5184000) / 86400, 1)
+                        st.success(f"Successfully generated long-lived token (valid for ~{exp_days} days)!")
+                    except MetaGraphAPIError as ex_err:
+                        st.error(str(ex_err))
+
+        if discover_clicked:
+            if not meta_token_input.strip():
+                st.error("Please input a Meta User Access Token before running auto-discovery.")
+            else:
+                try:
+                    with st.spinner("Connecting to Facebook Pages & querying Instagram Business accounts..."):
+                        disc_client = InstagramGraphAPIClient(access_token=meta_token_input)
+                        found_accounts = disc_client.get_connected_instagram_accounts()
+                        if not found_accounts:
+                            st.warning("No linked Instagram Creator/Business accounts found. Confirm your Facebook Page has an Instagram account connected.")
+                        else:
+                            st.session_state["discovered_ig_accounts"] = found_accounts
+                            st.success(f"Discovered {len(found_accounts)} connected Instagram account(s)!")
+                except MetaGraphAPIError as mg_err:
+                    st.error(str(mg_err))
+
+        selected_account_id = None
+        discovered_list = st.session_state.get("discovered_ig_accounts", [])
+        if discovered_list:
+            acc_options = {
+                f"@{acc['username']} ({acc['name']}) [Page: {acc['page_name']}]": acc["instagram_account_id"]
+                for acc in discovered_list
+            }
+            chosen_label = st.selectbox("Select Discovered Instagram Account:", list(acc_options.keys()))
+            selected_account_id = acc_options[chosen_label]
+        else:
+            acc_id_manual = st.text_input(
+                "Instagram Account ID (or auto-discover above):",
+                value=st.session_state.get("manual_ig_account_id", ""),
+                placeholder="e.g. 17841405822304914",
+                help="Your Instagram Business/Creator Account numeric ID.",
+            )
+            if acc_id_manual:
+                st.session_state["manual_ig_account_id"] = acc_id_manual
+                selected_account_id = acc_id_manual.strip()
+
+        fetch_col, _ = st.columns([2, 3])
+        with fetch_col:
+            fetch_creator_clicked = st.button("⚡ Fetch Live Creator Profile & Insights", type="primary", width="stretch")
+
+        if fetch_creator_clicked:
+            if not meta_token_input.strip():
+                st.error("Please provide a valid Meta User Access Token.")
+            elif not selected_account_id:
+                st.error("Please provide or discover an Instagram Account ID.")
+            else:
+                try:
+                    with st.spinner("Streaming live profile, audience demographics, and media metrics from Meta Graph API..."):
+                        client = InstagramGraphAPIClient(access_token=meta_token_input)
+                        live_profile = client.fetch_profile_data(selected_account_id)
+                        live_demographics = client.fetch_audience_demographics(selected_account_id)
+                        live_media = client.fetch_recent_media(selected_account_id, limit=6)
+
+                        # Sync country
+                        live_profile.country = live_demographics.top_country
+
+                        st.session_state["live_creator_profile"] = live_profile
+                        st.session_state["live_creator_demographics"] = live_demographics
+                        st.session_state["live_creator_media"] = live_media
+                        st.success(f"Successfully ingested live data for @{live_profile.username}!")
+                except MetaGraphAPIError as live_err:
+                    st.error(str(live_err))
+                except Exception as unk_err:
+                    st.error(f"Unexpected connector error: {str(unk_err)}")
+
+        # Render fetched live creator card if present
+        if "live_creator_profile" in st.session_state:
+            lp = st.session_state["live_creator_profile"]
+            ld = st.session_state.get("live_creator_demographics", Demographics())
+            lm = st.session_state.get("live_creator_media", [])
+
+            st.divider()
+            c_avatar, c_info, c_m1, c_m2, c_m3 = st.columns([1, 2.5, 1.2, 1.2, 1.2])
+            with c_avatar:
+                pfp = getattr(lp, "profile_picture_url", None)
+                if pfp:
+                    st.image(pfp, width=100)
+                else:
+                    st.markdown("📸 *(No Avatar)*")
+            with c_info:
+                st.markdown(f"### @{lp.username}")
+                st.write(f"**{lp.full_name}**")
+                bio = getattr(lp, "biography", "")
+                if bio:
+                    st.caption(bio[:160] + ("..." if len(bio) > 160 else ""))
+            with c_m1:
+                st.metric("Followers", f"{lp.total_followers:,}")
+            with c_m2:
+                st.metric("Following", f"{getattr(lp, 'raw_following', lp.total_following):,}")
+            with c_m3:
+                st.metric("Media Posts", f"{lp.total_media_posts:,}")
+
+            # Demographic Split
+            st.markdown("#### 👥 Live Audience Demographics (Meta Insights)")
+            d1, d2, d3, d4 = st.columns(4)
+            with d1:
+                st.metric("Top Country", f"🌍 {ld.top_country}")
+            with d2:
+                st.metric("Secondary Country", f"🌐 {ld.secondary_country}")
+            with d3:
+                st.metric("Dominant Age Bracket", f"🎂 {ld.primary_age_group}")
+            with d4:
+                st.metric(
+                    "Gender Distribution",
+                    f"♀️ {ld.gender_female_pct * 100:.1f}% / ♂️ {ld.gender_male_pct * 100:.1f}%",
+                )
+
+            # Recent Media Cards
+            if lm:
+                st.markdown("#### 📸 Recent Media Posts Performance")
+                media_cols = st.columns(min(len(lm), 3))
+                for i, post_item in enumerate(lm[:6]):
+                    with media_cols[i % len(media_cols)]:
+                        with st.container(border=True):
+                            st.markdown(
+                                f"**{post_item.media_type.value}** • `{post_item.posted_day_of_week} {post_item.posted_hour_of_day}:00`"
+                            )
+                            c_text = getattr(post_item, "caption", "") or ""
+                            if c_text:
+                                st.caption(f"\"{c_text[:110]}...\"" if len(c_text) > 110 else f"\"{c_text}\"")
+                            m_reach = post_item.metrics.reach if (post_item.metrics and post_item.metrics.reach is not None) else "N/A"
+                            m_likes = post_item.metrics.likes if post_item.metrics else 0
+                            m_comms = post_item.metrics.comments if post_item.metrics else 0
+                            m_shares = post_item.metrics.shares if post_item.metrics else 0
+                            reach_disp = f"{m_reach:,}" if isinstance(m_reach, int) else m_reach
+                            st.write(f"🎯 **Reach:** {reach_disp}")
+                            st.write(f"❤️ {m_likes:,} | 💬 {m_comms:,} | 🔄 {m_shares:,}")
+                            p_url = getattr(post_item, "permalink", None)
+                            if p_url:
+                                st.link_button("🔗 View on Instagram", p_url, width="stretch")
+
+            st.write("")
+            if st.button("📥 Load into What-If Simulator", type="primary", width="stretch"):
+                st.session_state["simulator_profile_mode"] = "🔗 Live Connected Creator Profile"
+                st.success("✅ Creator baseline & audience demographics transferred to Tab 2! Open Tab 2 to simulate posts.")
+
 
     # Sidebar Quick Queries
     st.sidebar.header("💡 Example Queries")
@@ -160,7 +364,7 @@ with tabs[0]:
 
                     # Formatted Data Table
                     display_cols = [
-                        "username", "media_type", "category", "categorization",
+                        "username", "platform", "media_type", "category", "categorization",
                         "total_followers", "top_country", "engagement_rate", "virality_score",
                         "per_media_likes", "per_media_shares", "per_media_saves"
                     ]
@@ -173,6 +377,7 @@ with tabs[0]:
 
                     col_configs = {
                         "username": st.column_config.TextColumn("Handle"),
+                        "platform": st.column_config.TextColumn("Platform"),
                         "media_type": st.column_config.TextColumn("Media"),
                         "category": st.column_config.TextColumn("Category"),
                         "categorization": st.column_config.TextColumn("Style"),
@@ -216,7 +421,13 @@ with tabs[1]:
 
     with sim_col1:
         st.markdown("#### 1. Profile Context")
-        profile_mode = st.radio("Select Profile Source:", ["Existing Creator from Database", "Custom Profile"], horizontal=True)
+        profile_options = ["Existing Creator from Database", "Custom Profile"]
+        if "live_creator_profile" in st.session_state:
+            profile_options.append("🔗 Live Connected Creator Profile")
+
+        default_mode = st.session_state.get("simulator_profile_mode", profile_options[0])
+        mode_idx = profile_options.index(default_mode) if default_mode in profile_options else 0
+        profile_mode = st.radio("Select Profile Source:", profile_options, index=mode_idx, horizontal=True)
 
         if profile_mode == "Existing Creator from Database":
             chosen_user = st.selectbox("Choose Account:", unique_creators, index=0)
@@ -229,6 +440,20 @@ with tabs[1]:
             sim_age_years = float(user_row.get("account_age_years", 4.0))
             sim_freq = float(user_row.get("posting_frequency_per_week", 3.5))
             st.caption(f"**Followers:** {sim_followers:,} | **Following:** {sim_following:,} | **Category:** {sim_cat} | **Age:** {sim_age_years} yrs")
+        elif profile_mode == "🔗 Live Connected Creator Profile":
+            live_p = st.session_state["live_creator_profile"]
+            live_d = st.session_state.get("live_creator_demographics", Demographics())
+            sim_followers = int(live_p.total_followers)
+            sim_following = int(live_p.total_following)
+            sim_posts = int(live_p.total_media_posts)
+            sim_cat = live_p.account_category.value
+            sim_country = live_d.top_country
+            sim_age_years = 4.0
+            sim_freq = 3.5
+            st.caption(
+                f"**Live Creator:** @{live_p.username} ({live_p.full_name}) | "
+                f"**Followers:** {sim_followers:,} | **Following:** {sim_following:,} | **Country:** {sim_country}"
+            )
         else:
             sim_followers = st.number_input("Total Followers:", min_value=100, max_value=1_000_000_000, value=250_000, step=10_000)
             sim_following = st.number_input("Total Following (Max 7,500):", min_value=0, max_value=7500, value=450, step=50)
@@ -240,7 +465,35 @@ with tabs[1]:
 
     with sim_col2:
         st.markdown("#### 2. Planned Media Specifications")
-        chosen_media_type = st.selectbox("Media Type:", [m.value for m in MediaType], index=0)
+        chosen_platform = st.selectbox(
+            "Platform:",
+            [PlatformType.INSTAGRAM.value, PlatformType.YOUTUBE.value, PlatformType.SNAPCHAT.value],
+            index=0,
+            help="Select the destination platform to calibrate platform-specific algorithms and creative constraints."
+        )
+
+        platform_formats = {
+            PlatformType.INSTAGRAM.value: [
+                MediaType.REEL.value,
+                MediaType.CAROUSEL.value,
+                MediaType.STATIC_IMAGE.value,
+                MediaType.STORY.value,
+                MediaType.VIDEO.value,
+            ],
+            PlatformType.YOUTUBE.value: [
+                MediaType.YOUTUBE_SHORT.value,
+                MediaType.YOUTUBE_VIDEO.value,
+                MediaType.COMMUNITY_POST.value,
+            ],
+            PlatformType.SNAPCHAT.value: [
+                MediaType.SNAPCHAT_SPOTLIGHT.value,
+                MediaType.SNAPCHAT_STORY.value,
+                MediaType.SNAPCHAT_POST.value,
+            ],
+        }
+
+        available_formats = platform_formats.get(chosen_platform, [m.value for m in MediaType])
+        chosen_media_type = st.selectbox("Media Format:", available_formats, index=0)
         chosen_post_cat = st.selectbox("Post Topic / Category:", [c.value for c in ContentCategory], index=0)
         chosen_styles = st.multiselect(
             "Content Styles / Categorizations:",
@@ -253,11 +506,26 @@ with tabs[1]:
         st.markdown("#### 3. Target Demographics")
         demo_col1, demo_col2, demo_col3 = st.columns(3)
         with demo_col1:
-            demo_country = st.selectbox("Top Country:", ["US", "IN", "BR", "GB", "ES", "CA"], index=0)
+            countries_list = ["US", "IN", "BR", "GB", "ES", "CA", "FR", "DE"]
+            def_country = "US"
+            if profile_mode == "🔗 Live Connected Creator Profile" and "live_creator_demographics" in st.session_state:
+                def_country = st.session_state["live_creator_demographics"].top_country
+            if def_country not in countries_list:
+                countries_list.insert(0, def_country)
+            demo_country = st.selectbox("Top Country:", countries_list, index=countries_list.index(def_country))
         with demo_col2:
-            demo_age = st.selectbox("Primary Age:", ["18-24", "25-34", "35-44", "45+"], index=1)
+            age_list = ["18-24", "25-34", "35-44", "45+"]
+            def_age = "25-34"
+            if profile_mode == "🔗 Live Connected Creator Profile" and "live_creator_demographics" in st.session_state:
+                def_age = st.session_state["live_creator_demographics"].primary_age_group
+            if def_age not in age_list:
+                age_list.insert(0, def_age)
+            demo_age = st.selectbox("Primary Age:", age_list, index=age_list.index(def_age))
         with demo_col3:
-            demo_female = st.slider("Female %:", 0.0, 1.0, 0.52, 0.05)
+            def_female = 0.52
+            if profile_mode == "🔗 Live Connected Creator Profile" and "live_creator_demographics" in st.session_state:
+                def_female = float(st.session_state["live_creator_demographics"].gender_female_pct)
+            demo_female = st.slider("Female %:", 0.0, 1.0, def_female, 0.05)
 
     # Advanced Granular Post & Scheduling Parameters
     with st.expander("⚙️ Advanced Granular Post & Content Parameters", expanded=False):
@@ -265,11 +533,40 @@ with tabs[1]:
         with adv_col1:
             sim_caption_len = st.slider("Caption Length (chars):", 20, 2200, 250, 50)
             sim_hashtags = st.slider("Hashtags Count:", 0, 30, 6, 1)
+            # Platform-specific creative inputs
+            if chosen_platform == PlatformType.YOUTUBE.value:
+                sim_video_title_len = st.slider("Video Title Length (chars):", 10, 100, 60, 5, help="Length of YouTube video or short title")
+                sim_thumb_face = st.checkbox("Thumbnail Has Face", value=True, help="YouTube thumbnails with expressive faces drive higher CTR")
+                sim_screenshots = 0
+            elif chosen_platform == PlatformType.SNAPCHAT.value:
+                sim_screenshots = int(st.number_input("Screenshot Count / Rate:", min_value=0, max_value=5000, value=15, help="Audience screenshot frequency"))
+                sim_video_title_len = 60
+                sim_thumb_face = True
+            else:
+                sim_video_title_len = 60
+                sim_thumb_face = True
+                sim_screenshots = 0
+
         with adv_col2:
             sim_cta = st.checkbox("Explicit Call-to-Action (CTA)", value=True, help="Prompts saves, shares, or comments")
             sim_mentions = st.number_input("Tagged Handles / Mentions:", min_value=0, max_value=10, value=1)
             if chosen_media_type == "Reel":
                 sim_video_sec = float(st.slider("Video Duration (seconds):", 5, 90, 30, 5))
+                sim_slides = 1
+            elif chosen_media_type == "Video":
+                sim_video_sec = float(st.slider("Video Duration (seconds):", 30, 600, 120, 15))
+                sim_slides = 1
+            elif chosen_media_type == "YouTube Short":
+                sim_video_sec = float(st.slider("Short Duration (seconds):", 5, 60, 30, 5))
+                sim_slides = 1
+            elif chosen_media_type == "YouTube Video":
+                sim_video_sec = float(st.slider("Video Duration (seconds):", 60, 1800, 480, 30))
+                sim_slides = 1
+            elif chosen_media_type == "Snapchat Spotlight":
+                sim_video_sec = float(st.slider("Spotlight Duration (seconds):", 5, 60, 15, 5))
+                sim_slides = 1
+            elif chosen_media_type == "Snapchat Story":
+                sim_video_sec = float(st.slider("Story Duration (seconds):", 3, 15, 10, 1))
                 sim_slides = 1
             elif chosen_media_type == "Carousel":
                 sim_slides = int(st.slider("Carousel Slide Count:", 2, 10, 5, 1))
@@ -285,9 +582,19 @@ with tabs[1]:
 
     if simulate_btn:
         get_cached_pipelines()
+        creator_uname = "simulated_creator"
+        creator_fname = "Simulated Creator"
+        if profile_mode == "🔗 Live Connected Creator Profile" and "live_creator_profile" in st.session_state:
+            creator_uname = st.session_state["live_creator_profile"].username
+            creator_fname = st.session_state["live_creator_profile"].full_name
+        elif profile_mode == "Existing Creator from Database":
+            creator_uname = chosen_user
+            creator_fname = chosen_user
+
         profile_dict = {
-            "username": "simulated_creator",
-            "full_name": "Simulated Creator",
+            "platform": chosen_platform,
+            "username": creator_uname,
+            "full_name": creator_fname,
             "country": sim_country,
             "total_followers": sim_followers,
             "total_following": sim_following,
@@ -298,6 +605,7 @@ with tabs[1]:
             "account_category": sim_cat
         }
         post_dict = {
+            "platform": chosen_platform,
             "media_type": chosen_media_type,
             "category": chosen_post_cat,
             "categorizations": chosen_styles,
@@ -308,6 +616,9 @@ with tabs[1]:
             "has_call_to_action": sim_cta,
             "video_duration_seconds": sim_video_sec,
             "carousel_slide_count": sim_slides,
+            "video_title_length": sim_video_title_len,
+            "thumbnail_has_face": sim_thumb_face,
+            "screenshot_count": sim_screenshots,
             "posted_hour_of_day": sim_hour,
             "posted_day_of_week": sim_day,
             "demographics": {
@@ -338,17 +649,28 @@ with tabs[1]:
                 else:
                     st.info(f"**Epistemic Check:** {sim_res.uncertainty_rating}")
 
+            # Dynamic platform-specific metric labels
+            if chosen_platform == PlatformType.YOUTUBE.value:
+                metric_reach_label = "Projected Reach"
+                metric_imp_label = "Projected Views & Reach"
+            elif chosen_platform == PlatformType.SNAPCHAT.value:
+                metric_reach_label = "Snap Reach"
+                metric_imp_label = "Snap Views & Reach"
+            else:
+                metric_reach_label = "Projected Reach"
+                metric_imp_label = "Projected Impressions"
+
             p1, p2, p3, p4 = st.columns(4)
             with p1:
                 st.metric(
-                    "Projected Reach",
+                    metric_reach_label,
                     f"{sim_res.projected_reach.point_estimate:,}",
                     help=f"Conformal Range: [{sim_res.projected_reach.lower:,} — {sim_res.projected_reach.upper:,}]"
                 )
                 st.caption(f"Range: {format_number(sim_res.projected_reach.lower)} – {format_number(sim_res.projected_reach.upper)}")
             with p2:
                 st.metric(
-                    "Projected Impressions",
+                    metric_imp_label,
                     f"{sim_res.projected_impressions.point_estimate:,}",
                     help=f"Conformal Range: [{sim_res.projected_impressions.lower:,} — {sim_res.projected_impressions.upper:,}]"
                 )
@@ -359,6 +681,82 @@ with tabs[1]:
             with p4:
                 st.metric("Virality Tier", sim_res.virality_tier)
                 st.caption(f"Virality Score: {sim_res.virality_score:.4f}")
+
+            # TreeSHAP / Creative Feature Attribution Waterfall
+            explanations = sim_res.feature_explanations
+            if not explanations:
+                # Fallback if not populated on simulation result
+                try:
+                    prof_obj = ProfileInput(**profile_dict)
+                    post_obj = PostInput(**post_dict)
+                    explanations = explain_post_prediction(post=post_obj, profile=prof_obj)
+                except Exception:
+                    explanations = None
+
+            if explanations and "drivers" in explanations:
+                base_reach = explanations["base_reach"]
+                final_reach = explanations["final_reach"]
+                drivers = explanations["drivers"]
+
+                st.markdown("#### 🌳 Creative Choice Explainability & Algorithmic Levers (TreeSHAP Waterfall)")
+
+                measures = ["absolute"] + ["relative"] * len(drivers) + ["total"]
+                x_labels = ["Baseline Creator Reach"] + [d["name"] for d in drivers] + ["Final Forecasted Reach"]
+                y_values = [base_reach] + [d["impact"] for d in drivers] + [0]
+
+                text_labels = [f"{base_reach:,}"]
+                for d in drivers:
+                    sign = "+" if d["impact"] >= 0 else ""
+                    text_labels.append(f"{sign}{d['impact']:,}<br>({sign}{d['pct']:.1f}%)")
+                text_labels.append(f"{final_reach:,}")
+
+                fig_waterfall = go.Figure(go.Waterfall(
+                    name="Reach Attribution",
+                    orientation="v",
+                    measure=measures,
+                    x=x_labels,
+                    y=y_values,
+                    text=text_labels,
+                    textposition="outside",
+                    decreasing={"marker": {"color": "#E74C3C"}},  # Red/Amber for negative penalties
+                    increasing={"marker": {"color": "#2ECC71"}},  # Green for positive drivers
+                    totals={"marker": {"color": "#3498DB"}},      # Blue for baseline & final
+                    connector={"line": {"color": "#7F8C8D", "width": 1, "dash": "dot"}},
+                ))
+
+                fig_waterfall.update_layout(
+                    title={
+                        "text": "<b>Algorithmic Reach Contribution by Creative Choice</b>",
+                        "x": 0.02,
+                        "xanchor": "left"
+                    },
+                    waterfallgap=0.25,
+                    height=460,
+                    margin=dict(l=20, r=20, t=50, b=40),
+                    yaxis_title="Projected Reach",
+                    xaxis_title="Creative Choice Lever",
+                    showlegend=False
+                )
+
+                st.plotly_chart(fig_waterfall, width="stretch")
+
+                st.caption(
+                    "💡 **How Algorithmic Levers Work:** The **Baseline Creator Reach** is the expected reach if this creator published an unoptimized static post during off-peak hours. "
+                    "Each creative choice (Media Format, Peak Timing, Hashtags, Call-to-Action, and Content Styles) acts as an algorithmic lever that either accelerates (green) or dampens (red) distribution based on our TreeSHAP attribution model."
+                )
+
+                with st.expander("📋 Detailed Creative Factor Impact Breakdown", expanded=False):
+                    driver_records = []
+                    for d in drivers:
+                        sign = "+" if d["impact"] >= 0 else ""
+                        driver_records.append({
+                            "Creative Lever": d["name"],
+                            "Reach Impact": f"{sign}{d['impact']:,}",
+                            "Relative Lift (%)": f"{sign}{d['pct']:.2f}%",
+                            "Direction": "🟢 Positive Driver" if d["direction"] == "positive" else "🔴 Penalty / Suboptimal",
+                            "Algorithmic Rationale": d["description"]
+                        })
+                    st.dataframe(pd.DataFrame(driver_records), width="stretch", hide_index=True)
 
             # Detailed Conformal Interval Diagnostics
             with st.expander("🔍 Conformal Uncertainty & Mathematical Coverage Diagnostics", expanded=False):

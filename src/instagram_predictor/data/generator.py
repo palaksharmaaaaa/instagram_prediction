@@ -52,27 +52,28 @@ def generate_enterprise_dataset(
     rng = np.random.default_rng(random_seed)
 
     usernames_seed = [
-        ("cristiano", "Cristiano Ronaldo", "Sports", "ES", 465000000, 520, 3328, True),
-        ("kyliejenner", "Kylie Jenner", "Fashion & Beauty", "US", 356000000, 98, 6921, True),
-        ("leomessi", "Leo Messi", "Sports", "ES", 347000000, 290, 875, True),
-        ("selenagomez", "Selena Gomez", "Music & Entertainment", "US", 334000000, 210, 1835, True),
-        ("therock", "Dwayne Johnson", "Health & Fitness", "US", 327000000, 580, 6660, True),
-        ("virat.kohli", "Virat Kohli", "Sports", "IN", 206000000, 240, 1390, True),
-        ("nike", "Nike", "Sports", "US", 228000000, 120, 932, True),
-        ("natgeo", "National Geographic", "Travel & Events", "US", 232000000, 140, 10002, True),
-        ("mrbeast", "MrBeast", "Entertainment / Trend", "US", 58000000, 340, 420, True),
-        ("hubermanlab", "Andrew Huberman", "Health & Fitness", "US", 5200000, 410, 890, True),
-        ("aliabdaal", "Ali Abdaal", "Education & Careers", "GB", 3100000, 320, 640, True),
-        ("garyvee", "Gary Vaynerchuk", "Finance & Business", "US", 10200000, 4500, 12400, True),
-        ("mkbhd", "Marques Brownlee", "Science & Technology", "US", 4800000, 380, 1200, True),
-        ("gordonramsay", "Gordon Ramsay", "Food & Dining", "GB", 14500000, 480, 3890, True)
+        ("cristiano", "Cristiano Ronaldo", "Sports", "ES", 465000000, 520, 3328, True, "Instagram"),
+        ("kyliejenner", "Kylie Jenner", "Fashion & Beauty", "US", 356000000, 98, 6921, True, "Instagram"),
+        ("leomessi", "Leo Messi", "Sports", "ES", 347000000, 290, 875, True, "Instagram"),
+        ("selenagomez", "Selena Gomez", "Music & Entertainment", "US", 334000000, 210, 1835, True, "Instagram"),
+        ("therock", "Dwayne Johnson", "Health & Fitness", "US", 327000000, 580, 6660, True, "Instagram"),
+        ("virat.kohli", "Virat Kohli", "Sports", "IN", 206000000, 240, 1390, True, "Instagram"),
+        ("nike", "Nike", "Sports", "US", 228000000, 120, 932, True, "Instagram"),
+        ("natgeo", "National Geographic", "Travel & Events", "US", 232000000, 140, 10002, True, "Instagram"),
+        ("mrbeast", "MrBeast", "Music & Entertainment", "US", 58000000, 340, 420, True, "YouTube"),
+        ("hubermanlab", "Andrew Huberman", "Health & Fitness", "US", 5200000, 410, 890, True, "YouTube"),
+        ("aliabdaal", "Ali Abdaal", "Education & Careers", "GB", 3100000, 320, 640, True, "YouTube"),
+        ("garyvee", "Gary Vaynerchuk", "Finance & Business", "US", 10200000, 4500, 12400, True, "Instagram"),
+        ("mkbhd", "Marques Brownlee", "Science & Technology", "US", 4800000, 380, 1200, True, "YouTube"),
+        ("gordonramsay", "Gordon Ramsay", "Food & Dining", "GB", 14500000, 480, 3890, True, "Instagram")
     ]
 
+    gen_platforms = ["Instagram", "Instagram", "YouTube", "Snapchat"]
     records = []
 
     for i in range(num_profiles):
         if i < len(usernames_seed):
-            u, fn, cat, country, followers, following, posts, verified = usernames_seed[i]
+            u, fn, cat, country, followers, following, posts, verified, platform = usernames_seed[i]
         else:
             cat = str(rng.choice(CATEGORIES))
             country = str(rng.choice(COUNTRIES))
@@ -84,12 +85,34 @@ def generate_enterprise_dataset(
             following = int(rng.integers(50, 4000))
             posts = int(rng.integers(100, 5000))
             verified = bool(followers > 1_000_000 and rng.random() > 0.3)
+            platform = gen_platforms[(i - len(usernames_seed)) % len(gen_platforms)]
 
         profile_categories = set([str(cat)])
         profile_records = []
 
         for p_idx in range(posts_per_profile):
-            media_type = str(rng.choice(MEDIA_TYPES, p=[0.45, 0.30, 0.20, 0.05]))
+            # Select platform-specific media format
+            if platform == "Instagram":
+                media_type = str(rng.choice(["Reel", "Carousel", "Static Image", "Story", "Video"], p=[0.40, 0.25, 0.20, 0.10, 0.05]))
+            elif platform == "YouTube":
+                media_type = str(rng.choice(["YouTube Short", "YouTube Video", "Community Post"], p=[0.55, 0.35, 0.10]))
+            else:  # Snapchat
+                media_type = str(rng.choice(["Snapchat Spotlight", "Snapchat Story", "Snapchat Post"], p=[0.45, 0.45, 0.10]))
+
+            # Platform-specific creative inputs
+            if platform == "YouTube":
+                title_len = int(rng.integers(25, 95))
+                thumb_face = bool(rng.random() > 0.30)
+                screenshots = 0
+            elif platform == "Snapchat":
+                title_len = 60
+                thumb_face = True
+                screenshots = int(rng.integers(10, 500))
+            else:
+                title_len = 60
+                thumb_face = True
+                screenshots = 0
+
             # 1. Single primary category for this media post
             post_cat = str(cat if rng.random() > 0.30 else rng.choice(CATEGORIES))
             profile_categories.add(post_cat)
@@ -102,54 +125,27 @@ def generate_enterprise_dataset(
             age_group = str(rng.choice(AGE_GROUPS, p=[0.35, 0.40, 0.18, 0.07]))
             female_pct = float(np.clip(rng.normal(0.52, 0.15), 0.10, 0.90))
 
-            # Base engagement rate modulated by follower tier (smaller accounts have higher % ER)
-            base_er = float(np.clip(0.045 - 0.003 * np.log10(max(followers, 100)), 0.008, 0.10))
-
-            # Media type multiplier on Reach and Virality
-            media_reach_mult = {
-                "Reel": rng.uniform(1.2, 2.5),
-                "Carousel": rng.uniform(0.7, 1.3),
-                "Static Image": rng.uniform(0.5, 0.9),
-                "Story": rng.uniform(0.15, 0.35)
-            }[media_type]
-
-            # Likes, comments, shares, saves
-            expected_likes = max(int(followers * base_er * rng.uniform(0.7, 1.4)), 10)
-            expected_comments = max(int(expected_likes * rng.uniform(0.015, 0.08)), 1)
-            
-            # Shares are boosted heavily on Reels and Educational Carousels
-            is_edu = "Educational / How-To" in post_styles
-            share_boost = 2.5 if media_type == "Reel" or is_edu else 1.0
-            expected_shares = max(int(expected_likes * rng.uniform(0.02, 0.12) * share_boost), 1)
-
-            # Saves are boosted heavily on Carousels and Educational content
-            save_boost = 3.0 if media_type == "Carousel" or is_edu else 1.0
-            expected_saves = max(int(expected_likes * rng.uniform(0.01, 0.10) * save_boost), 1)
-
-            # Reach: driven by followers, media type, and engagement velocity
-            reach = int(
-                (0.35 * followers + 0.65 * (expected_likes * 14 + expected_shares * 28 + expected_saves * 15))
-                * media_reach_mult
-                * rng.uniform(0.90, 1.12)
-            )
-            reach = max(reach, expected_likes + expected_comments + expected_shares + expected_saves + 50)
-
-            # Impressions: reach * frequency (typically 1.15 to 1.85)
-            frequency = rng.uniform(1.18, 1.80) if media_type != "Story" else rng.uniform(1.02, 1.15)
-            impressions = int(reach * frequency)
-
-            # Account-level granular attributes
-            acc_age = round(float(rng.uniform(1.0, 12.0)), 1)
-            posting_freq = round(float(rng.uniform(1.0, 14.0)), 1)
-            growth_rate = round(float(rng.uniform(-0.02, 0.15)), 3)
-            has_bio_link = bool(rng.random() > 0.35)
-
             # Post content semantics & structure
             caption_len = int(rng.integers(50, 2200))
             hashtags = int(rng.integers(0, 30))
             mentions = int(rng.integers(0, 8))
             has_cta = bool(rng.random() > 0.40)
-            video_sec = round(float(rng.uniform(5.0, 90.0)), 1) if media_type == "Reel" else 0.0
+
+            if media_type == "Reel":
+                video_sec = round(float(rng.uniform(5.0, 90.0)), 1)
+            elif media_type == "Video":
+                video_sec = round(float(rng.uniform(30.0, 300.0)), 1)
+            elif media_type == "YouTube Short":
+                video_sec = round(float(rng.uniform(10.0, 60.0)), 1)
+            elif media_type == "YouTube Video":
+                video_sec = round(float(rng.uniform(180.0, 1800.0)), 1)
+            elif media_type == "Snapchat Spotlight":
+                video_sec = round(float(rng.uniform(5.0, 60.0)), 1)
+            elif media_type == "Snapchat Story":
+                video_sec = round(float(rng.uniform(3.0, 15.0)), 1)
+            else:
+                video_sec = 0.0
+
             slide_count = int(rng.integers(2, 11)) if media_type == "Carousel" else 1
 
             # Temporal & scheduling
@@ -158,18 +154,108 @@ def generate_enterprise_dataset(
             is_wknd = int(day_of_week in ["Saturday", "Sunday"])
             is_peak = int(hour_of_day in [11, 12, 13, 18, 19, 20, 21])
 
+            # Base engagement rate modulated by follower tier (smaller accounts have higher % ER)
+            base_er = float(np.clip(0.045 - 0.003 * np.log10(max(followers, 100)), 0.008, 0.10))
+
+            # Media type multiplier on Reach and Virality
+            is_short_form = media_type in ["Reel", "YouTube Short", "Snapchat Spotlight"]
+            if is_short_form:
+                media_reach_mult = rng.uniform(1.4, 2.7)
+            elif media_type == "YouTube Video":
+                media_reach_mult = rng.uniform(1.2, 2.2)
+            elif media_type == "Carousel":
+                media_reach_mult = rng.uniform(0.7, 1.3)
+            elif media_type == "Static Image":
+                media_reach_mult = rng.uniform(0.5, 0.9)
+            elif media_type == "Video":
+                media_reach_mult = rng.uniform(0.9, 1.5)
+            elif media_type == "Snapchat Story":
+                media_reach_mult = rng.uniform(0.30, 0.65)
+            elif media_type == "Story":
+                media_reach_mult = rng.uniform(0.15, 0.35)
+            elif media_type == "Snapchat Post":
+                media_reach_mult = rng.uniform(0.35, 0.75)
+            else:  # Community Post
+                media_reach_mult = rng.uniform(0.25, 0.60)
+
+            # Creative boosts & realistic algorithmic signals
+            is_edu = "Educational / How-To" in post_styles
+            is_inspo = "Inspirational / Storytelling" in post_styles
+            cta_like_mult = 1.12 if has_cta else 0.96
+            cta_share_mult = 1.15 if has_cta else 0.95
+            cta_save_mult = 1.25 if has_cta else 0.95
+            cta_reach_mult = 1.08 if has_cta else 0.96
+            peak_mult = 1.15 if is_peak else 0.92
+            wknd_mult = 1.08 if is_wknd else 1.0
+            caption_mult = 1.08 if 150 <= caption_len <= 900 else (1.03 if caption_len > 900 else 0.96)
+            hashtag_mult = 1.10 if 3 <= hashtags <= 15 else (0.92 if hashtags == 0 else 0.98)
+
+            # Likes, comments, shares, saves
+            expected_likes = max(int(followers * base_er * cta_like_mult * peak_mult * wknd_mult * caption_mult * hashtag_mult * rng.uniform(0.7, 1.4)), 10)
+            expected_comments = max(int(expected_likes * rng.uniform(0.015, 0.08) * (1.3 if has_cta else 1.0)), 1)
+            
+            # Shares are boosted heavily on Short-form formats and Educational content
+            share_boost = (2.5 if is_short_form or is_edu else (1.4 if media_type == "YouTube Video" else 1.0)) * cta_share_mult
+            expected_shares = max(int(expected_likes * rng.uniform(0.02, 0.12) * share_boost), 1)
+
+            # Saves are boosted on Carousels, Educational content, and Long-form video
+            save_boost = (3.0 if media_type == "Carousel" or is_edu else (2.0 if media_type == "YouTube Video" else 1.0)) * cta_save_mult
+            expected_saves = max(int(expected_likes * rng.uniform(0.01, 0.10) * save_boost), 1)
+
+            # Reach: driven by followers, media type, timing, CTA, and engagement velocity
+            reach = int(
+                (0.35 * followers + 0.65 * (expected_likes * 14 + expected_shares * 28 + expected_saves * 15))
+                * media_reach_mult
+                * peak_mult
+                * cta_reach_mult
+                * rng.uniform(0.90, 1.12)
+            )
+            reach = max(reach, expected_likes + expected_comments + expected_shares + expected_saves + 50)
+
+            # Impressions: reach * frequency
+            if media_type == "YouTube Video":
+                frequency = rng.uniform(1.50, 2.50)
+            elif media_type in ["Story", "Snapchat Story"]:
+                frequency = rng.uniform(1.02, 1.15)
+            else:
+                frequency = rng.uniform(1.18, 1.80)
+            impressions = int(reach * frequency)
+
+            # Account-level granular attributes
+            acc_age = round(float(rng.uniform(1.0, 12.0)), 1)
+            posting_freq = round(float(rng.uniform(1.0, 14.0)), 1)
+            growth_rate = round(float(rng.uniform(-0.02, 0.15)), 3)
+            has_bio_link = bool(rng.random() > 0.35)
+
             # Audience demographics
             sec_country = str(rng.choice([c for c in COUNTRIES if c != country]))
             audience_activity = round(float(rng.uniform(0.40, 0.98)), 3)
 
             # Algorithmic discovery breakdown
-            explore_pct = round(float(np.clip(0.10 + 0.35 * (media_type == "Reel") + 0.20 * (expected_shares / (expected_likes + 1)), 0.05, 0.75)), 3)
+            if is_short_form:
+                explore_pct = round(float(np.clip(0.35 + 0.25 * (expected_shares / (expected_likes + 1)), 0.25, 0.80)), 3)
+                video_views = int(reach * rng.uniform(1.2, 2.2))
+                completion_rate = round(float(rng.uniform(0.35, 0.85)), 3)
+            elif media_type == "YouTube Video":
+                explore_pct = round(float(np.clip(0.20 + 0.15 * (expected_comments / (expected_likes + 1)), 0.15, 0.50)), 3)
+                video_views = int(reach * rng.uniform(0.8, 1.5))
+                completion_rate = round(float(rng.uniform(0.25, 0.65)), 3)
+            elif media_type in ["Story", "Snapchat Story"]:
+                explore_pct = round(float(rng.uniform(0.02, 0.08)), 3)
+                video_views = int(reach * rng.uniform(0.9, 1.2)) if media_type == "Snapchat Story" else 0
+                completion_rate = round(float(rng.uniform(0.55, 0.90)), 3) if media_type == "Snapchat Story" else 0.0
+            elif media_type == "Video":
+                explore_pct = round(float(np.clip(0.15 + 0.20 * (expected_shares / (expected_likes + 1)), 0.10, 0.60)), 3)
+                video_views = int(reach * rng.uniform(1.0, 1.6))
+                completion_rate = round(float(rng.uniform(0.25, 0.70)), 3)
+            else:
+                explore_pct = round(float(np.clip(0.10 + 0.15 * (expected_shares / (expected_likes + 1)), 0.05, 0.45)), 3)
+                video_views = 0
+                completion_rate = 0.0
+
             hashtag_pct = round(float(np.clip(0.02 + 0.004 * min(hashtags, 20), 0.01, 0.18)), 3)
             other_pct = round(float(rng.uniform(0.02, 0.10)), 3)
             home_pct = round(max(0.10, 1.0 - (explore_pct + hashtag_pct + other_pct)), 3)
-
-            video_views = int(reach * rng.uniform(1.1, 1.8)) if media_type == "Reel" else 0
-            completion_rate = round(float(rng.uniform(0.20, 0.85)), 3) if media_type == "Reel" else 0.0
 
             profile_records.append({
                 "username": u,
@@ -184,6 +270,7 @@ def generate_enterprise_dataset(
                 "posting_frequency_per_week": posting_freq,
                 "follower_growth_rate_30d": growth_rate,
                 "account_bio_has_link": has_bio_link,
+                "platform": platform,
                 "post_id": f"{u}_p{p_idx + 1}",
                 "media_type": media_type,
                 "category": post_cat,
@@ -195,6 +282,9 @@ def generate_enterprise_dataset(
                 "has_call_to_action": has_cta,
                 "video_duration_seconds": video_sec,
                 "carousel_slide_count": slide_count,
+                "video_title_length": title_len,
+                "thumbnail_has_face": thumb_face,
+                "screenshot_count": screenshots,
                 "posted_day_of_week": day_of_week,
                 "posted_hour_of_day": hour_of_day,
                 "is_weekend": is_wknd,

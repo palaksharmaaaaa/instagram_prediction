@@ -33,6 +33,9 @@ FEATURE_COLUMNS_NUMERIC = [
     "posted_hour_of_day",
     "is_weekend",
     "is_peak_posting_hour",
+    # Multi-platform content indicators
+    "is_short_form",
+    "is_video_content",
     # Demographics & audience
     "gender_female_pct",
     "gender_male_pct",
@@ -59,6 +62,7 @@ FEATURE_COLUMNS_NUMERIC = [
 ]
 
 FEATURE_COLUMNS_CATEGORICAL = [
+    "platform",
     "media_type",
     "category",
     "categorization",
@@ -69,6 +73,71 @@ FEATURE_COLUMNS_CATEGORICAL = [
 ]
 
 ALL_FEATURE_COLUMNS = FEATURE_COLUMNS_NUMERIC + FEATURE_COLUMNS_CATEGORICAL
+
+# =============================================================================
+# Pre-Publishing Feature Space (Strictly features known before publication)
+# ZERO post-publication metrics (no likes, comments, shares, saves, video views, completion rate, explore %)
+# =============================================================================
+PRE_PUBLISH_FEATURE_COLUMNS_NUMERIC = [
+    # Creator scale & account-level features
+    "total_followers",
+    "total_following",
+    "total_media_posts",
+    "account_age_years",
+    "posting_frequency_per_week",
+    "follower_growth_rate_30d",
+    "follower_following_ratio",
+    "log_followers",
+    "log_following",
+    "log_posts",
+    # Content structure & semantics
+    "caption_length_chars",
+    "hashtags_count",
+    "mentions_count",
+    "has_call_to_action",
+    "video_duration_seconds",
+    "carousel_slide_count",
+    # Multi-platform content indicators
+    "is_short_form",
+    "is_video_content",
+    # Temporal & scheduling
+    "posted_hour_of_day",
+    "is_weekend",
+    "is_peak_posting_hour",
+    # Audience demographics
+    "gender_female_pct",
+    "gender_male_pct",
+    "audience_activity_score",
+    # Multi-label content style indicators
+    "is_educational",
+    "is_entertaining",
+    "is_promotional",
+    "is_behind_scenes",
+    "is_inspirational",
+    # Pre-publishing domain interaction signals
+    "call_to_action_boost",
+    "hashtag_density"
+]
+
+PRE_PUBLISH_FEATURE_COLUMNS_CATEGORICAL = [
+    "platform",
+    "media_type",
+    "category",
+    "categorization",
+    "top_country",
+    "secondary_country",
+    "primary_age_group",
+    "posted_day_of_week"
+]
+
+ALL_PRE_PUBLISH_FEATURE_COLUMNS = (
+    PRE_PUBLISH_FEATURE_COLUMNS_NUMERIC + PRE_PUBLISH_FEATURE_COLUMNS_CATEGORICAL
+)
+
+# Post-Publishing Diagnostic Feature Space (Full space with engagement metrics)
+DIAGNOSTIC_FEATURE_COLUMNS_NUMERIC = FEATURE_COLUMNS_NUMERIC
+DIAGNOSTIC_FEATURE_COLUMNS_CATEGORICAL = FEATURE_COLUMNS_CATEGORICAL
+ALL_DIAGNOSTIC_FEATURE_COLUMNS = ALL_FEATURE_COLUMNS
 
 
 def _get_numeric_series(df: pd.DataFrame, col: str, default: float) -> pd.Series:
@@ -159,6 +228,44 @@ def compute_derived_metrics(df: pd.DataFrame) -> pd.DataFrame:
     df["media_type"] = _get_categorical_series(df, "media_type", "Reel")
     df["category"] = _get_categorical_series(df, "category", "Sports")
 
+    # Multi-platform indicator features:
+    # is_short_form: 1.0 for Reel, YouTube Short, Snapchat Spotlight, else 0.0
+    SHORT_FORM_FORMATS = {"Reel", "YouTube Short", "Snapchat Spotlight"}
+    df["is_short_form"] = df["media_type"].isin(SHORT_FORM_FORMATS).astype(float)
+
+    # is_video_content: 1.0 for Reel, Video, YouTube Video, YouTube Short, Snapchat Spotlight, Snapchat Story, else 0.0
+    VIDEO_CONTENT_FORMATS = {
+        "Reel", "Video", "YouTube Video", "YouTube Short",
+        "Snapchat Spotlight", "Snapchat Story"
+    }
+    df["is_video_content"] = df["media_type"].isin(VIDEO_CONTENT_FORMATS).astype(float)
+
+    # Multi-platform resolution & platform auto-inference
+    YOUTUBE_FORMATS = {"YouTube Short", "YouTube Video", "Community Post"}
+    SNAPCHAT_FORMATS = {"Snapchat Spotlight", "Snapchat Story", "Snapchat Post"}
+
+    if "platform" in df.columns:
+        def _resolve_platform(row):
+            p = str(row.get("platform") or "").strip()
+            mt = str(row.get("media_type") or "").strip()
+            if not p or p == "Instagram":
+                if mt in YOUTUBE_FORMATS:
+                    return "YouTube"
+                if mt in SNAPCHAT_FORMATS:
+                    return "Snapchat"
+                return "Instagram"
+            return p
+        df["platform"] = df.apply(_resolve_platform, axis=1)
+    else:
+        def _infer_platform_from_mt(mt):
+            mt_str = str(mt).strip()
+            if mt_str in YOUTUBE_FORMATS:
+                return "YouTube"
+            if mt_str in SNAPCHAT_FORMATS:
+                return "Snapchat"
+            return "Instagram"
+        df["platform"] = df["media_type"].apply(_infer_platform_from_mt)
+
     # Multi-label categorization extraction
     cat_raw = _get_categorical_series(df, "categorization", "Educational / How-To")
     cat_lower = cat_raw.str.lower()
@@ -187,15 +294,14 @@ def compute_derived_metrics(df: pd.DataFrame) -> pd.DataFrame:
 
     # 3. Domain Interaction Terms
     df["creator_scale_engagement"] = np.log1p(followers) * (total_eng / (followers + 1.0))
-    is_reel = (df.get("media_type", "").astype(str) == "Reel").astype(float)
-    is_carousel = (df.get("media_type", "").astype(str) == "Carousel").astype(float)
+    is_carousel = (df["media_type"] == "Carousel").astype(float)
 
-    df["virality_momentum"] = (shares / (likes + 1.0)) * (1.0 + is_reel)
+    df["virality_momentum"] = (shares / (likes + 1.0)) * (1.0 + df["is_short_form"])
     df["save_efficiency"] = (saves / (likes + 1.0)) * (1.0 + is_carousel + df["is_educational"] * 0.5)
     df["interaction_density"] = (comments + shares + saves) / (likes + 1.0)
     df["explore_discovery_potential"] = df["virality_momentum"] * (1.0 + explore_pct)
     df["call_to_action_boost"] = has_cta * (1.0 + is_carousel * 0.5)
-    df["watch_efficiency"] = completion_rate * is_reel
+    df["watch_efficiency"] = completion_rate * df["is_video_content"]
     df["hashtag_density"] = hashtags / (np.log1p(caption_len) + 1.0)
 
     # 4. Save Rate & Share Rate (if reach/impressions exist)

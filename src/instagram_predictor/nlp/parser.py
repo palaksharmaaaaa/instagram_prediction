@@ -65,7 +65,25 @@ MEDIA_TYPE_SYNONYMS = {
     "photos": MediaType.STATIC_IMAGE.value,
     "photo": MediaType.STATIC_IMAGE.value,
     "stories": MediaType.STORY.value,
-    "story": MediaType.STORY.value
+    "story": MediaType.STORY.value,
+    "video": MediaType.VIDEO.value,
+    "videos": MediaType.VIDEO.value,
+    "youtube shorts": MediaType.YOUTUBE_SHORT.value,
+    "youtube short": MediaType.YOUTUBE_SHORT.value,
+    "shorts": MediaType.YOUTUBE_SHORT.value,
+    "short": MediaType.YOUTUBE_SHORT.value,
+    "youtube video": MediaType.YOUTUBE_VIDEO.value,
+    "youtube videos": MediaType.YOUTUBE_VIDEO.value,
+    "community post": MediaType.COMMUNITY_POST.value,
+    "community posts": MediaType.COMMUNITY_POST.value,
+    "snapchat spotlight": MediaType.SNAPCHAT_SPOTLIGHT.value,
+    "spotlight": MediaType.SNAPCHAT_SPOTLIGHT.value,
+    "snapchat story": MediaType.SNAPCHAT_STORY.value,
+    "snapchat stories": MediaType.SNAPCHAT_STORY.value,
+    "snapchat post": MediaType.SNAPCHAT_POST.value,
+    "snapchat posts": MediaType.SNAPCHAT_POST.value,
+    "snap": MediaType.SNAPCHAT_POST.value,
+    "snaps": MediaType.SNAPCHAT_POST.value,
 }
 
 

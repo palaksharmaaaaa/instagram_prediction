@@ -1,4 +1,4 @@
-from typing import List, Optional
+from typing import List, Optional, Dict, Any
 from pydantic import BaseModel, Field
 
 
@@ -22,6 +22,10 @@ class SimulationPrediction(BaseModel):
     uncertainty_rating: str = Field(default="Calibrated (High Confidence)", description="Epistemic uncertainty and in-distribution assessment")
     prediction_interval_coverage: str = Field(default="80% Conformal Coverage Guarantee", description="Mathematical finite-sample coverage guarantee")
     optimization_tips: List[str] = Field(default_factory=list)
+    feature_explanations: Optional[Dict[str, Any]] = Field(
+        default=None,
+        description="TreeSHAP feature importance and creative choice attribution drivers"
+    )
 
 
 class MetricCard(BaseModel):
