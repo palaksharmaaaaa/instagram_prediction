@@ -209,3 +209,50 @@ def append_posts_csv(new_rows: pd.DataFrame, path: Optional[Path] = None) -> int
         out = new_rows
     out.to_csv(path, index=False)
     return len(new_rows)
+
+
+def upsert_creator_profile(profile_data: Dict[str, Any], path: Optional[Path] = None) -> bool:
+    """
+    Safely upserts or updates a creator row in creator_profiles.csv by username.
+    Preserves all existing columns and records without duplicating username.
+    """
+    path = Path(path) if path else settings.PROFILES_PATH
+    path.parent.mkdir(parents=True, exist_ok=True)
+    username = str(profile_data.get("username", "")).strip().lower()
+    if not username:
+        raise ValueError("Profile data must contain a valid non-empty username")
+
+    canonical_cols = [
+        "username", "full_name", "platform", "total_followers", "total_media_posts",
+        "account_category", "boost_index", "engagement_rate", "engagement_rate_60d",
+        "avg_likes", "avg_comments", "avg_video_views", "avg_1d", "avg_3d", "avg_7d",
+        "avg_14d", "avg_30d", "profile_url"
+    ]
+
+    if path.exists():
+        df = pd.read_csv(path, dtype=str, keep_default_na=False, na_values=[""])
+        cols = list(df.columns)
+    else:
+        cols = canonical_cols
+        df = pd.DataFrame(columns=cols)
+
+    row: Dict[str, str] = {c: "" for c in cols}
+    for k, v in profile_data.items():
+        k_norm = str(k).strip().lower()
+        if k_norm in cols and v is not None:
+            row[k_norm] = str(v)
+    row["username"] = username
+
+    # Check for match (case-insensitive)
+    matches = df.index[df["username"].astype(str).str.strip().str.lower() == username]
+    if len(matches) > 0:
+        idx = matches[0]
+        for k, v in row.items():
+            if v != "":
+                df.at[idx, k] = v
+    else:
+        new_row_df = pd.DataFrame([row], columns=cols)
+        df = pd.concat([df, new_row_df], ignore_index=True)
+
+    df.to_csv(path, index=False)
+    return True
